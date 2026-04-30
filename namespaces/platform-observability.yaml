@@ -1,0 +1,7 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: platform-observability
+  labels:
+    team: platform
+    env: shared
