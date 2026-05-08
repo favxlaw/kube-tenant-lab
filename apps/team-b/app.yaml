@@ -1,0 +1,58 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: team-b-app
+  namespace: team-b-demo
+  labels:
+    app: team-b-app
+    team: team-b
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: team-b-app
+  template:
+    metadata:
+      labels:
+        app: team-b-app
+        team: team-b
+    spec:
+      nodeSelector:
+        role: team-b
+      tolerations:
+        - key: "team"
+          operator: "Equal"
+          value: "team-b"
+          effect: "NoSchedule"
+      containers:
+        - name: app
+          image: hashicorp/http-echo:latest
+          args:
+            - "-text=hello from team-b"
+            - "-listen=:8080"
+          ports:
+            - containerPort: 8080
+          resources:
+            requests:
+              memory: "32Mi"
+              cpu: "10m"
+            limits:
+              memory: "64Mi"
+              cpu: "50m"
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: team-b-svc
+  namespace: team-b-demo
+  labels:
+    app: team-b-app
+    team: team-b
+spec:
+  selector:
+    app: team-b-app
+  ports:
+    - name: http
+      port: 80
+      targetPort: 8080
+  type: ClusterIP
