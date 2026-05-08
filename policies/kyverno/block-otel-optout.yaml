@@ -1,0 +1,45 @@
+apiVersion: kyverno.io/v1
+kind: ClusterPolicy
+metadata:
+  name: block-otel-optout
+  annotations:
+    policies.kyverno.io/title: Block OpenTelemetry Log Opt-Out
+    policies.kyverno.io/description: >-
+      Prevents any Pod or Namespace from opting out of
+      OpenTelemetry log collection. All workloads must remain
+      observable. The annotation
+      opentelemetry.io/exclude-logs=true is explicitly forbidden.
+spec:
+  validationFailureAction: Enforce
+  rules:
+    - name: block-pod-otel-optout
+      match:
+        any:
+          - resources:
+              kinds:
+                - Pod
+      validate:
+        message: >-
+          Pod '{{ request.object.metadata.name }}' in namespace
+          '{{ request.object.metadata.namespace }}' has
+          opentelemetry.io/exclude-logs set to true. Opting out
+          of log collection is not permitted on this platform.
+        pattern:
+          metadata:
+            annotations:
+              =(opentelemetry.io/exclude-logs): "!true"
+    - name: block-namespace-otel-optout
+      match:
+        any:
+          - resources:
+              kinds:
+                - Namespace
+      validate:
+        message: >-
+          Namespace '{{ request.object.metadata.name }}' has
+          opentelemetry.io/exclude-logs set to true. Opting out
+          of log collection is not permitted on this platform.
+        pattern:
+          metadata:
+            annotations:
+              =(opentelemetry.io/exclude-logs): "!true"

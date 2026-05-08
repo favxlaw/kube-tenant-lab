@@ -1,0 +1,36 @@
+apiVersion: kyverno.io/v1
+kind: ClusterPolicy
+metadata:
+  name: require-team-label
+  annotations:
+    policies.kyverno.io/title: Require Team Label on Namespaces
+    policies.kyverno.io/description: >-
+      All non-system namespaces must declare a team label
+      identifying the owning team. This enforces ownership
+      visibility across the platform.
+spec:
+  validationFailureAction: Enforce
+  rules:
+    - name: check-team-label
+      match:
+        any:
+          - resources:
+              kinds:
+                - Namespace
+      exclude:
+        any:
+          - resources:
+              namespaces:
+                - kube-system
+                - kube-public
+                - kube-node-lease
+                - kyverno
+      validate:
+        message: >-
+          Namespace '{{ request.object.metadata.name }}' is missing
+          a required 'team' label. Add metadata.labels.team to
+          identify the owning team.
+        pattern:
+          metadata:
+            labels:
+              team: "?*"

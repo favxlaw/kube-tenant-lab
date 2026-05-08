@@ -1,0 +1,44 @@
+apiVersion: kyverno.io/v1
+kind: ClusterPolicy
+metadata:
+  name: enforce-namespace-naming
+  annotations:
+    policies.kyverno.io/title: Enforce Namespace Naming Convention
+    policies.kyverno.io/description: >-
+      Namespace names must begin with the prefix matching their
+      team label value. A namespace with team=team-a must be
+      named team-a-*.
+spec:
+  validationFailureAction: Enforce
+  rules:
+    - name: check-namespace-prefix
+      match:
+        any:
+          - resources:
+              kinds:
+                - Namespace
+      exclude:
+        any:
+          - resources:
+              namespaces:
+                - kube-system
+                - kube-public
+                - kube-node-lease
+                - kyverno
+          - resources:
+              selector:
+                matchLabels:
+                  team: platform
+      validate:
+        message: >-
+          Namespace '{{ request.object.metadata.name }}' does not
+          match the required naming convention. A namespace with
+          team={{ request.object.metadata.labels.team }} must have
+          a name beginning with
+          '{{ request.object.metadata.labels.team }}-'.
+        deny:
+          conditions:
+            all:
+              - key: "{{ request.object.metadata.name }}"
+                operator: NotEquals
+                value: "{{ request.object.metadata.labels.team }}-*"
