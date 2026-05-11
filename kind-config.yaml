@@ -1,0 +1,17 @@
+kind: Cluster
+apiVersion: kind.x-k8s.io/v1alpha4
+name: kube-tenant-lab
+networking:
+  disableDefaultCNI: true
+  podSubnet: "10.244.0.0/16"
+  serviceSubnet: "10.96.0.0/12"
+nodes:
+  - role: control-plane
+    labels:
+      role: system
+  - role: worker
+    labels:
+      role: team-a
+  - role: worker
+    labels:
+      role: team-b

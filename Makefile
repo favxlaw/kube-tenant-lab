@@ -4,20 +4,26 @@
 # ==============================================================
 
 # --- Configuration ---
-MINIKUBE_NODES      := 3
-MINIKUBE_DRIVER     := docker
-MINIKUBE_MEMORY     := 2500
-MINIKUBE_CPUS       := 2
-
-CILIUM_VERSION      := 1.18.5
+CILIUM_VERSION      := 1.15.5
 GATEWAY_API_VERSION := v1.1.0
+KYVERNO_VERSION     := 3.1.4
+
+# Node names — KIND naming convention
+CONTROL_PLANE_NODE  := kube-tenant-lab-control-plane
+WORKER_A_NODE       := kube-tenant-lab-worker
+WORKER_B_NODE       := kube-tenant-lab-worker2
 
 # --- Phony targets ---
 .PHONY: all help \
         cluster-start cluster-delete \
         cilium-install cilium-status \
         configure-nodes \
-        validate
+        validate validate-all validate-network validate-policies validate-otel \
+        image-build image-load image-push \
+        namespaces-apply apps-deploy gateway-deploy platform-deploy platform-delete \
+        kyverno-install kyverno-policies-apply cilium-policies-apply \
+        policies-deploy policies-delete \
+        otel-gateway-deploy otel-agent-deploy otel-deploy otel-delete otel-logs
 
 # ==============================================================
 # Help
@@ -29,21 +35,53 @@ help:
 	@echo ""
 	@echo "Usage: make <target>"
 	@echo ""
-	@echo "  all               Full Day 1 setup in order"
+	@echo "  --- Cluster ---"
+	@echo "  cluster-start        Start 3-node KIND cluster"
+	@echo "  cluster-delete       Tear down the cluster"
 	@echo ""
-	@echo "  cluster-start     Start 3-node Minikube cluster"
-	@echo "  cluster-delete    Tear down the cluster"
+	@echo "  --- Cilium ---"
+	@echo "  cilium-install       Install Gateway API CRDs and Cilium CNI"
+	@echo "  cilium-status        Check Cilium health"
 	@echo ""
-	@echo "  cilium-install    Install Gateway API CRDs and Cilium CNI"
-	@echo "  cilium-status     Check Cilium health"
+	@echo "  --- Nodes ---"
+	@echo "  configure-nodes      Taint nodes for workload isolation"
 	@echo ""
-	@echo "  configure-nodes   Label and taint nodes for workload isolation"
+	@echo "  --- Application Image ---"
+	@echo "  image-build          Build Go app Docker image"
+	@echo "  image-load           Load image into KIND cluster"
+	@echo "  image-push           Build and load in one step"
 	@echo ""
-	@echo "  validate          Verify cluster, Cilium, and node config are healthy"
+	@echo "  --- Platform ---"
+	@echo "  namespaces-apply     Apply all namespace definitions"
+	@echo "  apps-deploy          Deploy team-a and team-b applications"
+	@echo "  gateway-deploy       Deploy Gateway and HTTPRoutes"
+	@echo "  platform-deploy      Deploy namespaces, apps, and gateway"
+	@echo "  platform-delete      Remove all platform resources"
+	@echo ""
+	@echo "  --- Policies ---"
+	@echo "  kyverno-install      Install Kyverno via Helm"
+	@echo "  kyverno-policies-apply  Apply all Kyverno ClusterPolicies"
+	@echo "  cilium-policies-apply   Apply all Cilium network policies"
+	@echo "  policies-deploy      Install Kyverno and apply all policies"
+	@echo "  policies-delete      Remove all policies"
+	@echo ""
+	@echo "  --- Observability ---"
+	@echo "  otel-gateway-deploy  Deploy OTel gateway collector"
+	@echo "  otel-agent-deploy    Deploy OTel agent DaemonSet"
+	@echo "  otel-deploy          Deploy full OTel stack"
+	@echo "  otel-delete          Remove OTel resources"
+	@echo "  otel-logs            Stream OTel gateway logs"
+	@echo ""
+	@echo "  --- Validate ---"
+	@echo "  validate             Verify cluster, Cilium, and node config"
+	@echo "  validate-all         Run all validation checks"
+	@echo "  validate-network     Check Cilium policies and cross-team traffic"
+	@echo "  validate-policies    Check Kyverno policies and test rejections"
+	@echo "  validate-otel        Check OTel pods and gateway logs"
 	@echo ""
 
 # ==============================================================
-# All
+# All — full cluster setup
 # ==============================================================
 
 all: cluster-start cilium-install configure-nodes validate
@@ -53,14 +91,10 @@ all: cluster-start cilium-install configure-nodes validate
 # ==============================================================
 
 cluster-start:
-	minikube start \
-		--nodes=$(MINIKUBE_NODES) \
-		--driver=$(MINIKUBE_DRIVER) \
-		--memory=$(MINIKUBE_MEMORY) \
-		--cpus=$(MINIKUBE_CPUS)
+	kind create cluster --config kind-config.yaml
 
 cluster-delete:
-	minikube delete
+	kind delete cluster --name kube-tenant-lab
 
 # ==============================================================
 # Cilium
@@ -68,7 +102,7 @@ cluster-delete:
 
 cilium-install:
 	@echo "==> Installing Gateway API CRDs..."
-	kubectl apply -f https://github.com/kubernetes-sigs/gateway-api/releases/download/$(GATEWAY_API_VERSION)/standard-install.yaml
+	kubectl apply -f https://github.com/kubernetes-sigs/gateway-api/releases/download/$(GATEWAY_API_VERSION)/experimental-install.yaml
 	@echo "==> Adding Cilium Helm repo..."
 	helm repo add cilium https://helm.cilium.io/ || true
 	helm repo update cilium
@@ -81,9 +115,11 @@ cilium-install:
 		--set gatewayAPI.enabled=true \
 		--set hubble.relay.enabled=true \
 		--set hubble.ui.enabled=true \
+		--set image.pullPolicy=IfNotPresent \
+		--timeout 10m \
 		--wait
 	@echo "==> Waiting for Cilium agents to report healthy..."
-	cilium status --wait
+	cilium status
 
 cilium-status:
 	cilium status
@@ -93,13 +129,99 @@ cilium-status:
 # ==============================================================
 
 configure-nodes:
-	@echo "==> Labelling nodes..."
-	kubectl label node minikube        role=system  --overwrite
-	kubectl label node minikube-m02    role=team-a  --overwrite
-	kubectl label node minikube-m03    role=team-b  --overwrite
 	@echo "==> Tainting team nodes..."
-	kubectl taint node minikube-m02    team=team-a:NoSchedule --overwrite
-	kubectl taint node minikube-m03    team=team-b:NoSchedule --overwrite
+	kubectl taint node $(WORKER_A_NODE) team=team-a:NoSchedule --overwrite
+	kubectl taint node $(WORKER_B_NODE) team=team-b:NoSchedule --overwrite
+	@echo "==> Verifying node labels..."
+	kubectl get nodes --show-labels
+
+# ==============================================================
+# Application Image
+# ==============================================================
+
+image-build:
+	docker build -t tenant-app:v1 ./apps/src
+
+image-load:
+	kind load docker-image tenant-app:v1 --name kube-tenant-lab
+
+image-push: image-build image-load
+
+# ==============================================================
+# Platform
+# ==============================================================
+
+platform-deploy: namespaces-apply apps-deploy gateway-deploy
+
+namespaces-apply:
+	kubectl apply -f namespaces/
+
+apps-deploy:
+	kubectl apply -f apps/team-a/
+	kubectl apply -f apps/team-b/
+
+gateway-deploy:
+	kubectl apply -f gateway/
+
+platform-delete:
+	kubectl delete -f gateway/ --ignore-not-found
+	kubectl delete -f apps/team-a/ --ignore-not-found
+	kubectl delete -f apps/team-b/ --ignore-not-found
+	kubectl delete -f namespaces/ --ignore-not-found
+
+# ==============================================================
+# Policies
+# ==============================================================
+
+policies-deploy: kyverno-install cilium-policies-apply kyverno-policies-apply
+
+kyverno-install:
+	helm repo add kyverno https://kyverno.github.io/kyverno/ || true
+	helm repo update kyverno
+	helm install kyverno kyverno/kyverno \
+		--version $(KYVERNO_VERSION) \
+		--namespace kyverno \
+		--create-namespace \
+		--wait
+
+kyverno-policies-apply:
+	@echo "==> Applying Kyverno policies..."
+	kubectl apply -f policies/kyverno/require-team-label.yaml
+	kubectl apply -f policies/kyverno/enforce-namespace-naming.yaml
+	kubectl apply -f policies/kyverno/scheduling-guardrail.yaml
+	kubectl apply -f policies/kyverno/block-otel-optout.yaml
+
+cilium-policies-apply:
+	@echo "==> Applying Cilium network policies..."
+	kubectl apply -f policies/cilium/
+
+policies-delete:
+	kubectl delete -f policies/cilium/ --ignore-not-found
+	kubectl delete -f policies/kyverno/ --ignore-not-found
+
+# ==============================================================
+# Observability
+# ==============================================================
+
+otel-deploy: otel-gateway-deploy otel-agent-deploy
+
+otel-gateway-deploy:
+	@echo "==> Deploying OTel gateway..."
+	kubectl apply -f observability/otel-collector-config-gateway.yaml
+	kubectl apply -f observability/otel-gateway-deployment.yaml
+	kubectl rollout status deployment/otel-gateway -n platform-observability
+
+otel-agent-deploy:
+	@echo "==> Deploying OTel agents..."
+	kubectl apply -f observability/otel-collector-config-agent.yaml
+	kubectl apply -f observability/otel-agent-daemonset.yaml
+	kubectl rollout status daemonset/otel-agent -n platform-observability
+
+otel-delete:
+	kubectl delete -f observability/ --ignore-not-found
+
+otel-logs:
+	kubectl logs -n platform-observability deploy/otel-gateway --follow
 
 # ==============================================================
 # Validate
@@ -116,3 +238,47 @@ validate:
 	@echo "==> Cilium health"
 	cilium status
 
+validate-all: validate validate-network validate-policies validate-otel
+
+validate-network:
+	@echo ""
+	@echo "==> Cilium network policies"
+	kubectl get ciliumnetworkpolicies -A
+	@echo ""
+	@echo "==> Gateway and HTTPRoutes"
+	kubectl get gateway,httproute -A
+	@echo ""
+	@echo "==> Testing cross-team traffic (should be blocked)"
+	kubectl exec -n team-a-demo deploy/team-a-app -- \
+		wget -qO- --timeout=3 \
+		http://team-b-svc.team-b-demo.svc.cluster.local \
+		|| echo "BLOCKED as expected"
+
+validate-policies:
+	@echo ""
+	@echo "==> Kyverno cluster policies"
+	kubectl get clusterpolicies
+	@echo ""
+	@echo "==> Testing bad namespace no label (should be rejected)"
+	kubectl apply -f policies/kyverno/test-cases/bad-namespace-no-label.yaml \
+		|| echo "REJECTED as expected"
+	@echo ""
+	@echo "==> Testing bad namespace wrong name (should be rejected)"
+	kubectl apply -f policies/kyverno/test-cases/bad-namespace-wrong-name.yaml \
+		|| echo "REJECTED as expected"
+	@echo ""
+	@echo "==> Testing bad workload wrong node (should be rejected)"
+	kubectl apply -f policies/kyverno/test-cases/bad-workload-wrong-node.yaml \
+		|| echo "REJECTED as expected"
+	@echo ""
+	@echo "==> Testing OTel opt-out annotation (should be rejected)"
+	kubectl apply -f policies/kyverno/test-cases/bad-otel-optout.yaml \
+		|| echo "REJECTED as expected"
+
+validate-otel:
+	@echo ""
+	@echo "==> OTel pods"
+	kubectl get pods -n platform-observability -o wide
+	@echo ""
+	@echo "==> OTel gateway logs (last 20 lines)"
+	kubectl logs -n platform-observability deploy/otel-gateway --tail=20
