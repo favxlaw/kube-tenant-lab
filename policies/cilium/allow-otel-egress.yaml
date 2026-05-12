@@ -1,35 +1,35 @@
 apiVersion: cilium.io/v2
 kind: CiliumNetworkPolicy
 metadata:
-  name: allow-dns-egress
+  name: allow-otel-egress
   namespace: team-a-demo
 spec:
   endpointSelector: {}
   egress:
     - toEndpoints:
         - matchLabels:
-            io.kubernetes.pod.namespace: kube-system
+            io.kubernetes.pod.namespace: platform-observability
       toPorts:
         - ports:
-            - port: "53"
-              protocol: UDP
-            - port: "53"
+            - port: "4317"
+              protocol: TCP
+            - port: "4318"
               protocol: TCP
 ---
 apiVersion: cilium.io/v2
 kind: CiliumNetworkPolicy
 metadata:
-  name: allow-dns-egress
+  name: allow-otel-egress
   namespace: team-b-demo
 spec:
   endpointSelector: {}
   egress:
     - toEndpoints:
         - matchLabels:
-            io.kubernetes.pod.namespace: kube-system
+            io.kubernetes.pod.namespace: platform-observability
       toPorts:
         - ports:
-            - port: "53"
-              protocol: UDP
-            - port: "53"
+            - port: "4317"
+              protocol: TCP
+            - port: "4318"
               protocol: TCP

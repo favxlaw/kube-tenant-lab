@@ -8,9 +8,8 @@ spec:
     matchLabels:
       app: team-a-app
   ingress:
-    - fromEndpoints:
-        - matchLabels:
-            io.kubernetes.pod.namespace: platform-ingress
+    - fromEntities:
+        - ingress
       toPorts:
         - ports:
             - port: "8080"
