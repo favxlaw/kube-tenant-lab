@@ -24,6 +24,7 @@ WORKER_B_NODE       := kube-tenant-lab-worker2
         test-clients-deploy test-clients-delete \
         kyverno-install kyverno-policies-apply cilium-policies-apply \
         policies-deploy policies-delete \
+        rbac-apply \
         otel-gateway-deploy otel-agent-deploy otel-deploy otel-delete otel-logs
 
 # ==============================================================
@@ -180,7 +181,7 @@ platform-delete:
 # Policies
 # ==============================================================
 
-policies-deploy: kyverno-install cilium-policies-apply kyverno-policies-apply
+policies-deploy: kyverno-install rbac-apply cilium-policies-apply kyverno-policies-apply
 
 kyverno-install:
 	helm repo add kyverno https://kyverno.github.io/kyverno/ || true
@@ -204,6 +205,12 @@ kyverno-install:
 		--timeout 15m \
 		--wait
 
+rbac-apply:
+	@echo "==> Applying RBAC..."
+	kubectl apply -f rbac/platform-readonly-clusterrole.yaml
+	kubectl apply -f rbac/platform-readonly-clusterrolebinding.yaml
+	kubectl apply -f rbac/team-serviceaccount.yaml
+
 kyverno-policies-apply:
 	@echo "==> Applying Kyverno policies..."
 	kubectl apply -f policies/kyverno/require-team-label.yaml
@@ -215,6 +222,7 @@ kyverno-policies-apply:
 	kubectl apply -f policies/kyverno/generate-network-policy.yaml
 	kubectl apply -f policies/kyverno/generate-rolebinding.yaml
 	kubectl apply -f policies/kyverno/generate-platform-config.yaml
+	kubectl apply -f policies/kyverno/mutate-namespace-pod-security.yaml
 
 cilium-policies-apply:
 	@echo "==> Applying Cilium clusterwide network policies..."

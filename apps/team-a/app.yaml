@@ -16,7 +16,9 @@ spec:
       labels:
         app: team-a-app
         team: team-a
+      annotations: {}
     spec:
+      serviceAccountName: team-app
       nodeSelector:
         role: team-a
       tolerations:
@@ -28,6 +30,15 @@ spec:
         - name: app
           image: tenant-app:v1
           imagePullPolicy: Never
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 1000
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            seccompProfile:
+              type: RuntimeDefault
+            capabilities:
+              drop: ["ALL"]
           ports:
             - containerPort: 8080
           env:

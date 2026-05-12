@@ -1,0 +1,36 @@
+apiVersion: kyverno.io/v1
+kind: ClusterPolicy
+metadata:
+  name: mutate-team-namespace-pod-security
+  annotations:
+    policies.kyverno.io/title: Add Pod Security Labels to Team Namespaces
+    policies.kyverno.io/description: >-
+      Automatically adds pod security standard labels to any namespace
+      with a team label. Ensures restricted pod security is enforced
+      on all team namespaces without relying on manual label addition.
+spec:
+  rules:
+    - name: add-pod-security-labels
+      match:
+        any:
+          - resources:
+              kinds:
+                - Namespace
+              selector:
+                matchExpressions:
+                  - key: team
+                    operator: Exists
+      exclude:
+        any:
+          - resources:
+              selector:
+                matchLabels:
+                  team: platform
+      mutate:
+        patchStrategicMerge:
+          metadata:
+            labels:
+              pod-security.kubernetes.io/enforce: restricted
+              pod-security.kubernetes.io/enforce-version: latest
+              pod-security.kubernetes.io/warn: restricted
+              pod-security.kubernetes.io/warn-version: latest
