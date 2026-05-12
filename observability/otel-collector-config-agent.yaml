@@ -54,64 +54,6 @@ data:
           processors: [resource, resourcedetection, batch]
           exporters: [otlp]
         metrics:
-          receivers: [hoapiVersion: v1
-kind: ConfigMap
-metadata:
-  name: otel-agent-config
-  namespace: platform-observability
-data:
-  config.yaml: |
-    receivers:
-      filelog:
-        include:
-          - /var/log/pods/team-a-demo_*/*/*.log
-          - /var/log/pods/team-b-demo_*/*/*.log
-        start_at: beginning
-        include_file_path: true
-        include_file_name: false
-        operators:
-          - type: json_parser
-            if: 'body matches "^\\{"'
-          - type: move
-            from: attributes["log.file.path"]
-            to: resource["log.file.path"]
-
-      hostmetrics:
-        collection_interval: 30s
-        scrapers:
-          cpu: {}
-          memory: {}
-          network: {}
-
-    processors:
-      resource:
-        attributes:
-          - key: k8s.node.name
-            from_attribute: host.name
-            action: insert
-      resourcedetection:
-        detectors: [env, system]
-        system:
-          hostname_sources: [os]
-      batch:
-        timeout: 5s
-        send_batch_size: 1000
-
-    exporters:
-      otlp:
-        endpoint: otel-gateway.platform-observability.svc.cluster.local:4317
-        tls:
-          insecure: true
-
-    service:
-      pipelines:
-        logs:
-          receivers: [filelog]
-          processors: [resource, resourcedetection, batch]
-          exporters: [otlp]
-        metrics:
           receivers: [hostmetrics]
-          processors: [resource, resourcedetection, batch]
-          exporters: [otlp]stmetrics]
           processors: [resource, resourcedetection, batch]
           exporters: [otlp]

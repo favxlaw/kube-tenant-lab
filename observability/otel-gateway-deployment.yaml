@@ -16,7 +16,14 @@ spec:
       labels:
         app: otel-gateway
         team: platform
+      annotations: {}
     spec:
+      tolerations:
+        - key: node-role.kubernetes.io/control-plane
+          operator: Exists
+          effect: NoSchedule
+      nodeSelector:
+        role: system
       containers:
         - name: otel-gateway
           image: otel/opentelemetry-collector-contrib:0.96.0

@@ -15,6 +15,7 @@ spec:
       labels:
         app: otel-agent
         team: platform
+      annotations: {}
     spec:
       serviceAccountName: otel-agent
       tolerations:
