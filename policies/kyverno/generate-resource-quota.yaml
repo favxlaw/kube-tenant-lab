@@ -1,0 +1,47 @@
+apiVersion: kyverno.io/v1
+kind: ClusterPolicy
+metadata:
+  name: generate-team-resource-quota
+  annotations:
+    policies.kyverno.io/title: Generate ResourceQuota for Team Namespaces
+    policies.kyverno.io/description: >-
+      Automatically creates a ResourceQuota in every namespace with
+      a team label. Ensures fair resource distribution across teams
+      and prevents any single team from consuming all cluster resources.
+      Quota is applied at namespace creation and cannot be removed by teams.
+spec:
+  rules:
+    - name: generate-resource-quota
+      match:
+        any:
+          - resources:
+              kinds:
+                - Namespace
+              selector:
+                matchExpressions:
+                  - key: team
+                    operator: Exists
+      exclude:
+        any:
+          - resources:
+              selector:
+                matchLabels:
+                  team: platform
+      generate:
+        apiVersion: v1
+        kind: ResourceQuota
+        name: team-resource-quota
+        namespace: "{{ request.object.metadata.name }}"
+        synchronize: true
+        data:
+          spec:
+            hard:
+              requests.cpu: "1"
+              requests.memory: 1Gi
+              limits.cpu: "2"
+              limits.memory: 2Gi
+              pods: "10"
+              services: "5"
+              configmaps: "10"
+              secrets: "10"
+              persistentvolumeclaims: "5"

@@ -5,45 +5,39 @@ metadata:
   annotations:
     policies.kyverno.io/title: Workload Scheduling Guardrail
     policies.kyverno.io/description: >-
-      Workloads in team-a namespaces must not target team-b nodes
-      and vice versa. Prevents cross-team node targeting which
-      would break workload isolation guarantees.
+      Workloads must only target nodes belonging to their own team.
+      Enforcement is based on the namespace team label, not the
+      namespace name. Any namespace with a team label is covered
+      automatically. A pod targeting a node with a different team
+      role than its namespace team label is rejected.
 spec:
   validationFailureAction: Enforce
   rules:
-    - name: team-a-cannot-target-team-b
+    - name: node-selector-must-match-namespace-team
       match:
         any:
           - resources:
               kinds:
                 - Pod
-              namespaces:
-                - team-a-demo
+              namespaceSelector:
+                matchExpressions:
+                  - key: team
+                    operator: Exists
+      preconditions:
+        all:
+          - key: "{{ request.object.spec.nodeSelector.role || '' }}"
+            operator: NotEquals
+            value: ""
       validate:
         message: >-
-          Workloads in team-a-demo must not target team-b nodes.
-          nodeSelector.role must be team-a or omitted.
+          Pod '{{ request.object.metadata.name }}' is targeting node
+          role '{{ request.object.spec.nodeSelector.role }}' but its
+          namespace belongs to team
+          '{{ request.object.metadata.labels.team || request.namespace.metadata.labels.team }}'.
+          Workloads must only target their own team nodes.
         deny:
           conditions:
             all:
-              - key: "{{ request.object.spec.nodeSelector.role || '' }}"
-                operator: Equals
-                value: team-b
-    - name: team-b-cannot-target-team-a
-      match:
-        any:
-          - resources:
-              kinds:
-                - Pod
-              namespaces:
-                - team-b-demo
-      validate:
-        message: >-
-          Workloads in team-b-demo must not target team-a nodes.
-          nodeSelector.role must be team-b or omitted.
-        deny:
-          conditions:
-            all:
-              - key: "{{ request.object.spec.nodeSelector.role || '' }}"
-                operator: Equals
-                value: team-a
+              - key: "{{ request.object.spec.nodeSelector.role }}"
+                operator: NotEquals
+                value: "{{ request.namespaceObject.metadata.labels.team }}"

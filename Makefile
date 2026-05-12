@@ -210,6 +210,7 @@ kyverno-policies-apply:
 	kubectl apply -f policies/kyverno/enforce-namespace-naming.yaml
 	kubectl apply -f policies/kyverno/scheduling-guardrail.yaml
 	kubectl apply -f policies/kyverno/block-otel-optout.yaml
+	kubectl apply -f policies/kyverno/generate-resource-quota.yaml
 
 cilium-policies-apply:
 	@echo "==> Applying Cilium clusterwide network policies..."
@@ -217,7 +218,7 @@ cilium-policies-apply:
 	kubectl apply -f policies/cilium/clusterwide-allow-gateway.yaml
 	kubectl apply -f policies/cilium/clusterwide-allow-dns.yaml
 	kubectl apply -f policies/cilium/clusterwide-allow-otel.yaml
-	
+
 policies-delete:
 	kubectl delete -f policies/cilium/ --ignore-not-found
 	kubectl delete -f policies/kyverno/ --ignore-not-found
