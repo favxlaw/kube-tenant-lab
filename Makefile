@@ -21,6 +21,7 @@ WORKER_B_NODE       := kube-tenant-lab-worker2
         validate validate-all validate-network validate-policies validate-otel \
         image-build image-load image-push \
         namespaces-apply apps-deploy gateway-deploy platform-deploy platform-delete \
+        test-clients-deploy test-clients-delete \
         kyverno-install kyverno-policies-apply cilium-policies-apply \
         policies-deploy policies-delete \
         otel-gateway-deploy otel-agent-deploy otel-deploy otel-delete otel-logs
@@ -163,6 +164,12 @@ apps-deploy:
 gateway-deploy:
 	kubectl apply -f gateway/
 
+test-clients-deploy:
+	kubectl apply -f test-client.yaml
+
+test-clients-delete:
+	kubectl delete -f test-client.yaml --ignore-not-found
+
 platform-delete:
 	kubectl delete -f gateway/ --ignore-not-found
 	kubectl delete -f apps/team-a/ --ignore-not-found
@@ -182,6 +189,19 @@ kyverno-install:
 		--version $(KYVERNO_VERSION) \
 		--namespace kyverno \
 		--create-namespace \
+		--set admissionController.tolerations[0].key=node-role.kubernetes.io/control-plane \
+		--set admissionController.tolerations[0].operator=Exists \
+		--set admissionController.tolerations[0].effect=NoSchedule \
+		--set backgroundController.tolerations[0].key=node-role.kubernetes.io/control-plane \
+		--set backgroundController.tolerations[0].operator=Exists \
+		--set backgroundController.tolerations[0].effect=NoSchedule \
+		--set cleanupController.tolerations[0].key=node-role.kubernetes.io/control-plane \
+		--set cleanupController.tolerations[0].operator=Exists \
+		--set cleanupController.tolerations[0].effect=NoSchedule \
+		--set reportsController.tolerations[0].key=node-role.kubernetes.io/control-plane \
+		--set reportsController.tolerations[0].operator=Exists \
+		--set reportsController.tolerations[0].effect=NoSchedule \
+		--timeout 15m \
 		--wait
 
 kyverno-policies-apply:
@@ -248,12 +268,16 @@ validate-network:
 	@echo "==> Gateway and HTTPRoutes"
 	kubectl get gateway,httproute -A
 	@echo ""
-	@echo "==> Testing cross-team traffic (should be blocked)"
-	kubectl exec -n team-a-demo deploy/team-a-app -- \
-		wget -qO- --timeout=3 \
-		http://team-b-svc.team-b-demo.svc.cluster.local \
+	@echo "==> Testing cross-team traffic (should be BLOCKED)"
+	kubectl exec -n team-a-demo pod/client -- \
+		curl -m 3 http://team-b-svc.team-b-demo.svc.cluster.local \
 		|| echo "BLOCKED as expected"
-
+	@echo ""
+	@echo "==> Testing gateway path (should be ALLOWED)"
+	GATEWAY=$$(kubectl get gateway platform-gateway \
+		-n platform-ingress \
+		-o jsonpath='{.status.addresses[0].value}'); \
+	curl -m 3 http://$$GATEWAY/team-a
 validate-policies:
 	@echo ""
 	@echo "==> Kyverno cluster policies"
