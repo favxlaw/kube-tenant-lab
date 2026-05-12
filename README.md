@@ -54,6 +54,7 @@ kube-tenant-lab/
 ├── Makefile
 ├── README.md
 ├── kind-config.yaml
+├── test-client.yaml
 ├── namespaces/
 │   ├── team-a-demo.yaml
 │   ├── team-b-demo.yaml
@@ -88,7 +89,8 @@ kube-tenant-lab/
 │       ├── default-deny-team-b.yaml
 │       ├── allow-gateway-team-a.yaml
 │       ├── allow-gateway-team-b.yaml
-│       └── allow-dns.yaml
+│       ├── allow-dns.yaml
+│       └── allow-otel-egress.yaml
 └── observability/
     ├── otel-collector-config-agent.yaml
     ├── otel-agent-daemonset.yaml
@@ -141,7 +143,7 @@ Layer 3 — Network (Cilium)
   eBPF identity-based default-deny posture
   Pods cannot communicate unless explicitly allowed
   Only the Gateway path is open to team workloads
-  DNS egress is the only other permitted flow
+  DNS egress and OTel egress are the only other permitted flows
 ```
 
 Removing any one layer leaves a gap the other two cannot cover.
@@ -162,7 +164,7 @@ Envoy checks routing table programmed from HTTPRoute team-a-route
 Path /team-a matches → forward to team-a-svc:80
         ↓
 Cilium eBPF translates ClusterIP to pod IP, checks network policy
-Policy: allow ingress from platform-ingress on port 8080
+Policy: allow ingress from reserved:ingress entity on port 8080
         ↓
 Request reaches team-a-app container on kube-tenant-lab-worker
 Go HTTP server handles request
@@ -297,15 +299,14 @@ kubectl get gateway -n platform-ingress
 
 `PROGRAMMED` must show `True` and `ADDRESS` must have an IP.
 
-Test routing:
+Get the Gateway service IP and test routing from inside the KIND network:
 
 ```bash
-GATEWAY=$(kubectl get gateway platform-gateway \
-  -n platform-ingress \
-  -o jsonpath='{.status.addresses[0].value}')
+GATEWAY=$(kubectl get svc -n platform-ingress \
+  -o jsonpath='{.items[0].status.loadBalancer.ingress[0].ip}')
 
-curl http://$GATEWAY/team-a
-curl http://$GATEWAY/team-b
+docker exec kube-tenant-lab-worker curl -s http://$GATEWAY/team-a
+docker exec kube-tenant-lab-worker curl -s http://$GATEWAY/team-b
 ```
 
 Expected responses:
@@ -315,16 +316,33 @@ Expected responses:
 {"message":"hello from team-b","team":"team-b","namespace":"team-b-demo","trace_id":"..."}
 ```
 
-### 7. Deploy policies
+### 7. Deploy test clients
+
+```bash
+kubectl apply -f test-client.yaml
+```
+
+Deploys a curl client pod in each team namespace for network policy validation.
+Verify both land on the correct nodes:
+
+```bash
+kubectl get pods -n team-a-demo -o wide
+kubectl get pods -n team-b-demo -o wide
+```
+
+### 8. Deploy policies
 
 ```bash
 make policies-deploy
 ```
 
-Installs Kyverno via Helm then applies all four ClusterPolicies
-and all Cilium network policies.
+Installs Kyverno via Helm with tolerations for the control plane taint,
+then applies all four ClusterPolicies and all Cilium network policies.
 
-### 8. Deploy observability
+Note: Kyverno must run on the control plane node because team nodes are
+tainted for exclusive team workload use.
+
+### 9. Deploy observability
 
 ```bash
 make otel-deploy
@@ -332,6 +350,15 @@ make otel-deploy
 
 Deploys OTel gateway first, then OTel agents.
 Gateway must be ready before agents start to avoid connection errors on startup.
+Both the gateway and agents require tolerations to schedule on tainted nodes.
+
+Verify all pods are running:
+
+```bash
+kubectl get pods -n platform-observability -o wide
+```
+
+Expected: one `otel-gateway` on control-plane, one `otel-agent` on each node.
 
 ---
 
@@ -346,6 +373,7 @@ Gateway must be ready before agents start to avoid connection errors on startup.
 | `make configure-nodes` | Taint nodes for workload isolation |
 | `make image-push` | Build Go app image and load into KIND |
 | `make platform-deploy` | Deploy namespaces, apps, and gateway |
+| `make test-clients-deploy` | Deploy curl client pods for validation |
 | `make policies-deploy` | Install Kyverno and apply all policies |
 | `make otel-deploy` | Deploy OTel agent and gateway |
 | `make validate` | Verify cluster, Cilium, and node config |
@@ -375,12 +403,11 @@ cilium status
 ```bash
 kubectl get gateway,httproute -A
 
-GATEWAY=$(kubectl get gateway platform-gateway \
-  -n platform-ingress \
-  -o jsonpath='{.status.addresses[0].value}')
+GATEWAY=$(kubectl get svc -n platform-ingress \
+  -o jsonpath='{.items[0].status.loadBalancer.ingress[0].ip}')
 
-curl http://$GATEWAY/team-a
-curl http://$GATEWAY/team-b
+docker exec kube-tenant-lab-worker curl -s http://$GATEWAY/team-a
+docker exec kube-tenant-lab-worker curl -s http://$GATEWAY/team-b
 ```
 
 ### Kyverno policies
@@ -388,7 +415,7 @@ curl http://$GATEWAY/team-b
 ```bash
 kubectl get clusterpolicies
 
-# Each of these must be rejected
+# Each of these must produce a Kyverno rejection error
 kubectl apply -f policies/kyverno/test-cases/bad-namespace-no-label.yaml
 kubectl apply -f policies/kyverno/test-cases/bad-namespace-wrong-name.yaml
 kubectl apply -f policies/kyverno/test-cases/bad-workload-wrong-node.yaml
@@ -400,11 +427,15 @@ kubectl apply -f policies/kyverno/test-cases/bad-otel-optout.yaml
 ```bash
 kubectl get ciliumnetworkpolicies -A
 
-# Must be blocked
-kubectl exec -n team-a-demo deploy/team-a-app -- \
-  wget -qO- --timeout=3 \
-  http://team-b-svc.team-b-demo.svc.cluster.local \
+# Cross-team traffic must be blocked
+kubectl exec -n team-a-demo pod/client -- \
+  curl -m 3 http://team-b-svc.team-b-demo.svc.cluster.local \
   || echo "BLOCKED as expected"
+
+# Gateway path must be allowed
+GATEWAY=$(kubectl get svc -n platform-ingress \
+  -o jsonpath='{.items[0].status.loadBalancer.ingress[0].ip}')
+docker exec kube-tenant-lab-worker curl -s http://$GATEWAY/team-a
 ```
 
 ### Observability
@@ -414,6 +445,21 @@ kubectl get pods -n platform-observability -o wide
 kubectl logs -n platform-observability deploy/otel-gateway --tail=20
 ```
 
+Logs should show records with `log.file.path` containing the team namespace
+and `platform: kube-tenant-lab` identifying the cluster.
+
+### Hubble UI
+
+Port-forward Hubble UI in a separate terminal:
+
+```bash
+kubectl port-forward -n kube-system svc/hubble-ui 12000:80
+```
+
+Open `http://localhost:12000` in your browser.
+Select `team-a-demo` or `team-b-demo` from the namespace dropdown.
+Generate traffic and observe allowed and dropped flows in real time.
+
 ---
 
 ## Trade-offs and Simplifications
@@ -421,12 +467,13 @@ kubectl logs -n platform-observability deploy/otel-gateway --tail=20
 | Decision | Simplification | Production alternative |
 |---|---|---|
 | KIND instead of cloud | Nodes are Docker containers, not real VMs | Cloud provider managed nodes |
-| No LoadBalancer | KIND assigns IPs from Docker network — not externally routable | MetalLB on bare metal, cloud LB on cloud |
+| Gateway IP not routable from host | KIND Docker network IPs unreachable from laptop, must use docker exec | MetalLB or cloud provider assigns externally routable IPs |
 | `kubeProxyReplacement=false` | Cilium and kube-proxy coexist | Full kube-proxy replacement |
 | Experimental Gateway API CRDs | Required by Cilium 1.15.5 for tlsroutes | Standard channel sufficient on Cilium 1.16+ |
+| Kyverno on control-plane only | Team node taints prevent Kyverno scheduling on worker nodes | Dedicated platform nodes with explicit tolerations |
 | debug exporter for OTel | Telemetry printed to stdout only | Prometheus, Loki, Jaeger backends |
 | No TLS on Gateway | HTTP only | cert-manager with Let's Encrypt |
 | `allowedRoutes.from: All` | Any namespace can attach to Gateway | Namespace label selector |
 | Single OTel gateway replica | No high availability | Multiple replicas with load balancing |
+| reserved:ingress for Gateway allow | Cilium embedded Envoy uses ingress identity not namespace identity | Dedicated Envoy DaemonSet with explicit namespace identity |
 ```
-
