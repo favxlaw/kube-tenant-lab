@@ -1,0 +1,44 @@
+apiVersion: kyverno.io/v1
+kind: ClusterPolicy
+metadata:
+  name: generate-team-rolebinding
+  annotations:
+    policies.kyverno.io/title: Generate RoleBinding for Team Namespaces
+    policies.kyverno.io/description: >-
+      Automatically creates a RoleBinding in every new team namespace
+      that grants the team's group edit access to their own namespace.
+      The team is identified from the namespace team label.
+      Without this, teams cannot access their own namespace after creation.
+spec:
+  rules:
+    - name: generate-rolebinding
+      match:
+        any:
+          - resources:
+              kinds:
+                - Namespace
+              selector:
+                matchExpressions:
+                  - key: team
+                    operator: Exists
+      exclude:
+        any:
+          - resources:
+              selector:
+                matchLabels:
+                  team: platform
+      generate:
+        apiVersion: rbac.authorization.k8s.io/v1
+        kind: RoleBinding
+        name: team-edit-access
+        namespace: "{{ request.object.metadata.name }}"
+        synchronize: true
+        data:
+          roleRef:
+            apiGroup: rbac.authorization.k8s.io
+            kind: ClusterRole
+            name: edit
+          subjects:
+            - apiGroup: rbac.authorization.k8s.io
+              kind: Group
+              name: "{{ request.object.metadata.labels.team }}"

@@ -213,6 +213,8 @@ kyverno-policies-apply:
 	kubectl apply -f policies/kyverno/generate-resource-quota.yaml
 	kubectl apply -f policies/kyverno/generate-limit-range.yaml
 	kubectl apply -f policies/kyverno/generate-network-policy.yaml
+	kubectl apply -f policies/kyverno/generate-rolebinding.yaml
+	kubectl apply -f policies/kyverno/generate-platform-config.yaml
 
 cilium-policies-apply:
 	@echo "==> Applying Cilium clusterwide network policies..."
