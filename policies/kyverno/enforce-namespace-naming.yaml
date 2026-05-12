@@ -7,7 +7,8 @@ metadata:
     policies.kyverno.io/description: >-
       Namespace names must begin with the prefix matching their
       team label value. A namespace with team=team-a must be
-      named team-a-*.
+      named team-a-*. Enforces Option 2 — label value and name
+      must be consistent. Any mismatch is rejected.
 spec:
   validationFailureAction: Enforce
   rules:
@@ -20,15 +21,19 @@ spec:
       exclude:
         any:
           - resources:
-              namespaces:
-                - kube-system
-                - kube-public
-                - kube-node-lease
-                - kyverno
+              selector:
+                matchExpressions:
+                  - key: team
+                    operator: DoesNotExist
           - resources:
               selector:
                 matchLabels:
                   team: platform
+      preconditions:
+        all:
+          - key: "{{ request.object.metadata.labels.team || '' }}"
+            operator: NotEquals
+            value: ""
       validate:
         message: >-
           Namespace '{{ request.object.metadata.name }}' does not
