@@ -1,0 +1,282 @@
+apiVersion: kyverno.io/v1
+kind: ClusterPolicy
+metadata:
+  name: generate-otel-collector
+  annotations:
+    policies.kyverno.io/title: Generate OTel Collector for Team Namespaces
+    policies.kyverno.io/description: >-
+      Automatically deploys a scoped OpenTelemetry collector into every
+      new team namespace. The collector only reads logs from its own
+      namespace, ensuring telemetry isolation between teams.
+      Teams point their apps to otel-collector.<namespace>.svc.cluster.local:4317
+spec:
+  rules:
+    - name: generate-otel-configmap
+      match:
+        any:
+          - resources:
+              kinds:
+                - Namespace
+              selector:
+                matchExpressions:
+                  - key: team
+                    operator: Exists
+      exclude:
+        any:
+          - resources:
+              selector:
+                matchLabels:
+                  team: platform
+      generate:
+        apiVersion: v1
+        kind: ConfigMap
+        name: otel-collector-config
+        namespace: "{{ request.object.metadata.name }}"
+        synchronize: true
+        data:
+          data:
+            config.yaml: |
+              receivers:
+                filelog:
+                  include:
+                    - /var/log/pods/{{ request.object.metadata.name }}_*/*/*.log
+                  start_at: beginning
+                  include_file_path: true
+                  include_file_name: false
+                  operators:
+                    - type: json_parser
+                      if: 'body matches "^\\{"'
+                    - type: move
+                      from: attributes["log.file.path"]
+                      to: resource["log.file.path"]
+                otlp:
+                  protocols:
+                    grpc:
+                      endpoint: 0.0.0.0:4317
+              processors:
+                resource:
+                  attributes:
+                    - key: team
+                      value: "{{ request.object.metadata.labels.team }}"
+                      action: insert
+                    - key: namespace
+                      value: "{{ request.object.metadata.name }}"
+                      action: insert
+                    - key: platform
+                      value: kube-tenant-lab
+                      action: insert
+                batch:
+                  timeout: 5s
+                  send_batch_size: 1000
+              exporters:
+                otlp:
+                  endpoint: otel-gateway.platform-observability.svc.cluster.local:4317
+                  tls:
+                    insecure: true
+              service:
+                pipelines:
+                  logs:
+                    receivers: [filelog]
+                    processors: [resource, batch]
+                    exporters: [otlp]
+                  traces:
+                    receivers: [otlp]
+                    processors: [resource, batch]
+                    exporters: [otlp]
+                  metrics:
+                    receivers: [otlp]
+                    processors: [resource, batch]
+                    exporters: [otlp]
+
+    - name: generate-otel-serviceaccount
+      match:
+        any:
+          - resources:
+              kinds:
+                - Namespace
+              selector:
+                matchExpressions:
+                  - key: team
+                    operator: Exists
+      exclude:
+        any:
+          - resources:
+              selector:
+                matchLabels:
+                  team: platform
+      generate:
+        apiVersion: v1
+        kind: ServiceAccount
+        name: otel-collector
+        namespace: "{{ request.object.metadata.name }}"
+        synchronize: true
+        data:
+          metadata:
+            labels:
+              team: "{{ request.object.metadata.labels.team }}"
+
+    - name: generate-otel-role
+      match:
+        any:
+          - resources:
+              kinds:
+                - Namespace
+              selector:
+                matchExpressions:
+                  - key: team
+                    operator: Exists
+      exclude:
+        any:
+          - resources:
+              selector:
+                matchLabels:
+                  team: platform
+      generate:
+        apiVersion: rbac.authorization.k8s.io/v1
+        kind: Role
+        name: otel-collector
+        namespace: "{{ request.object.metadata.name }}"
+        synchronize: true
+        data:
+          rules:
+            - apiGroups: [""]
+              resources: ["pods", "namespaces"]
+              verbs: ["get", "list", "watch"]
+
+    - name: generate-otel-rolebinding
+      match:
+        any:
+          - resources:
+              kinds:
+                - Namespace
+              selector:
+                matchExpressions:
+                  - key: team
+                    operator: Exists
+      exclude:
+        any:
+          - resources:
+              selector:
+                matchLabels:
+                  team: platform
+      generate:
+        apiVersion: rbac.authorization.k8s.io/v1
+        kind: RoleBinding
+        name: otel-collector
+        namespace: "{{ request.object.metadata.name }}"
+        synchronize: true
+        data:
+          roleRef:
+            apiGroup: rbac.authorization.k8s.io
+            kind: Role
+            name: otel-collector
+          subjects:
+            - kind: ServiceAccount
+              name: otel-collector
+              namespace: "{{ request.object.metadata.name }}"
+
+    - name: generate-otel-service
+      match:
+        any:
+          - resources:
+              kinds:
+                - Namespace
+              selector:
+                matchExpressions:
+                  - key: team
+                    operator: Exists
+      exclude:
+        any:
+          - resources:
+              selector:
+                matchLabels:
+                  team: platform
+      generate:
+        apiVersion: v1
+        kind: Service
+        name: otel-collector
+        namespace: "{{ request.object.metadata.name }}"
+        synchronize: true
+        data:
+          spec:
+            selector:
+              app: otel-collector
+            ports:
+              - name: otlp-grpc
+                port: 4317
+                targetPort: 4317
+                protocol: TCP
+            type: ClusterIP
+
+    - name: generate-otel-deployment
+      match:
+        any:
+          - resources:
+              kinds:
+                - Namespace
+              selector:
+                matchExpressions:
+                  - key: team
+                    operator: Exists
+      exclude:
+        any:
+          - resources:
+              selector:
+                matchLabels:
+                  team: platform
+      generate:
+        apiVersion: apps/v1
+        kind: Deployment
+        name: otel-collector
+        namespace: "{{ request.object.metadata.name }}"
+        synchronize: true
+        data:
+          spec:
+            replicas: 1
+            selector:
+              matchLabels:
+                app: otel-collector
+            template:
+              metadata:
+                labels:
+                  app: otel-collector
+                  team: "{{ request.object.metadata.labels.team }}"
+                annotations: {}
+              spec:
+                serviceAccountName: otel-collector
+                tolerations:
+                  - operator: Exists
+                containers:
+                  - name: otel-collector
+                    image: otel/opentelemetry-collector-contrib:0.96.0
+                    args:
+                      - "--config=/conf/config.yaml"
+                    securityContext:
+                      runAsNonRoot: true
+                      runAsUser: 1000
+                      allowPrivilegeEscalation: false
+                      readOnlyRootFilesystem: true
+                      seccompProfile:
+                        type: RuntimeDefault
+                      capabilities:
+                        drop: ["ALL"]
+                    volumeMounts:
+                      - name: config
+                        mountPath: /conf
+                      - name: varlogpods
+                        mountPath: /var/log/pods
+                        readOnly: true
+                    resources:
+                      requests:
+                        memory: "64Mi"
+                        cpu: "50m"
+                      limits:
+                        memory: "256Mi"
+                        cpu: "200m"
+                volumes:
+                  - name: config
+                    configMap:
+                      name: otel-collector-config
+                  - name: varlogpods
+                    hostPath:
+                      path: /var/log/pods

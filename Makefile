@@ -222,6 +222,7 @@ kyverno-policies-apply:
 	kubectl apply -f policies/kyverno/generate-network-policy.yaml
 	kubectl apply -f policies/kyverno/generate-rolebinding.yaml
 	kubectl apply -f policies/kyverno/generate-platform-config.yaml
+	kubectl apply -f policies/kyverno/generate-otel-collector.yaml
 	kubectl apply -f policies/kyverno/mutate-namespace-pod-security.yaml
 
 cilium-policies-apply:
@@ -239,19 +240,14 @@ policies-delete:
 # Observability
 # ==============================================================
 
-otel-deploy: otel-gateway-deploy otel-agent-deploy
+otel-deploy: otel-gateway-deploy
 
 otel-gateway-deploy:
 	@echo "==> Deploying OTel gateway..."
-	kubectl apply -f observability/otel-collector-config-gateway.yaml
+	kubectl apply -f observability/gateway/otel-gateway-config.yaml
 	kubectl apply -f observability/otel-gateway-deployment.yaml
 	kubectl rollout status deployment/otel-gateway -n platform-observability
 
-otel-agent-deploy:
-	@echo "==> Deploying OTel agents..."
-	kubectl apply -f observability/otel-collector-config-agent.yaml
-	kubectl apply -f observability/otel-agent-daemonset.yaml
-	kubectl rollout status daemonset/otel-agent -n platform-observability
 
 otel-delete:
 	kubectl delete -f observability/ --ignore-not-found
