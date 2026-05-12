@@ -26,8 +26,7 @@ spec:
         deny:
           conditions:
             all:
-              - key: "{{ request.object.spec.nodeSelector.role \
-                  | default('', @) }}"
+              - key: "{{ request.object.spec.nodeSelector.role || '' }}"
                 operator: Equals
                 value: team-b
     - name: team-b-cannot-target-team-a
@@ -45,7 +44,6 @@ spec:
         deny:
           conditions:
             all:
-              - key: "{{ request.object.spec.nodeSelector.role \
-                  | default('', @) }}"
+              - key: "{{ request.object.spec.nodeSelector.role || '' }}"
                 operator: Equals
                 value: team-a

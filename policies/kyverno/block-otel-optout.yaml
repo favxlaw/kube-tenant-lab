@@ -18,6 +18,11 @@ spec:
           - resources:
               kinds:
                 - Pod
+      preconditions:
+        all:
+          - key: "{{ request.object.metadata.annotations || '' }}"
+            operator: NotEquals
+            value: ""
       validate:
         message: >-
           Pod '{{ request.object.metadata.name }}' in namespace
@@ -34,6 +39,11 @@ spec:
           - resources:
               kinds:
                 - Namespace
+      preconditions:
+        all:
+          - key: "{{ request.object.metadata.annotations || '' }}"
+            operator: NotEquals
+            value: ""
       validate:
         message: >-
           Namespace '{{ request.object.metadata.name }}' has
