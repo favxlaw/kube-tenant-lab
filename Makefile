@@ -211,6 +211,8 @@ kyverno-policies-apply:
 	kubectl apply -f policies/kyverno/scheduling-guardrail.yaml
 	kubectl apply -f policies/kyverno/block-otel-optout.yaml
 	kubectl apply -f policies/kyverno/generate-resource-quota.yaml
+	kubectl apply -f policies/kyverno/generate-limit-range.yaml
+	kubectl apply -f policies/kyverno/generate-network-policy.yaml
 
 cilium-policies-apply:
 	@echo "==> Applying Cilium clusterwide network policies..."

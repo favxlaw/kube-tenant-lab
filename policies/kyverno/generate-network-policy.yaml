@@ -1,0 +1,41 @@
+apiVersion: kyverno.io/v1
+kind: ClusterPolicy
+metadata:
+  name: generate-team-network-policy
+  annotations:
+    policies.kyverno.io/title: Generate Default-Deny NetworkPolicy for Team Namespaces
+    policies.kyverno.io/description: >-
+      Automatically creates a default-deny NetworkPolicy in every
+      namespace with a team label. Ensures no team namespace is ever
+      left open between creation and manual policy application.
+      Works alongside CiliumClusterwideNetworkPolicy as defense in depth.
+spec:
+  rules:
+    - name: generate-default-deny
+      match:
+        any:
+          - resources:
+              kinds:
+                - Namespace
+              selector:
+                matchExpressions:
+                  - key: team
+                    operator: Exists
+      exclude:
+        any:
+          - resources:
+              selector:
+                matchLabels:
+                  team: platform
+      generate:
+        apiVersion: networking.k8s.io/v1
+        kind: NetworkPolicy
+        name: default-deny-all
+        namespace: "{{ request.object.metadata.name }}"
+        synchronize: true
+        data:
+          spec:
+            podSelector: {}
+            policyTypes:
+              - Ingress
+              - Egress
