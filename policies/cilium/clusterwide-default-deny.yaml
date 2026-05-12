@@ -1,0 +1,15 @@
+apiVersion: cilium.io/v2
+kind: CiliumClusterwideNetworkPolicy
+metadata:
+  name: default-deny-team-namespaces
+spec:
+  endpointSelector:
+    matchLabels:
+      io.cilium.k8s.namespace.labels.team: ""
+    matchExpressions:
+      - key: io.cilium.k8s.namespace.labels.team
+        operator: Exists
+  ingress:
+    - {}
+  egress:
+    - {}
