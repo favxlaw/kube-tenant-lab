@@ -1,0 +1,11 @@
+apiVersion: v1
+kind: Pod
+metadata:
+  name: logging-escape-attempt
+  namespace: team-a-demo
+  annotations:
+    opentelemetry.io/exclude-logs: "true"
+spec:
+  containers:
+    - name: app
+      image: hashicorp/http-echo:latest

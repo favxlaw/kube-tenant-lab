@@ -1,0 +1,11 @@
+apiVersion: v1
+kind: Pod
+metadata:
+  name: bad-pod
+  namespace: team-a-demo
+spec:
+  nodeSelector:
+    role: team-b
+  containers:
+    - name: app
+      image: hashicorp/http-echo:latest
