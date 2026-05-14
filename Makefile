@@ -186,7 +186,7 @@ policies-deploy: kyverno-install rbac-apply cilium-policies-apply kyverno-polici
 kyverno-install:
 	helm repo add kyverno https://kyverno.github.io/kyverno/ || true
 	helm repo update kyverno
-	helm install kyverno kyverno/kyverno \
+	helm upgrade --install kyverno kyverno/kyverno \
 		--version $(KYVERNO_VERSION) \
 		--namespace kyverno \
 		--create-namespace \
@@ -240,17 +240,19 @@ policies-delete:
 # Observability
 # ==============================================================
 
-otel-deploy: otel-gateway-deploy
+otel-deploy: otel-gateway-deploy otel-collectors-deploy
 
-otel-gateway-deploy:
-	@echo "==> Deploying OTel gateway..."
-	kubectl apply -f observability/gateway/otel-gateway-config.yaml
-	kubectl apply -f observability/otel-gateway-deployment.yaml
-	kubectl rollout status deployment/otel-gateway -n platform-observability
+otel-collectors-deploy:
+	@echo "==> Deploying platform-owned team collectors..."
+	kubectl apply -f observability/collectors/
+	kubectl rollout status deployment/otel-collector-team-a -n platform-observability
+	kubectl rollout status deployment/otel-collector-team-b -n platform-observability
 
 
 otel-delete:
-	kubectl delete -f observability/ --ignore-not-found
+	kubectl delete -f observability/collectors/ --ignore-not-found
+	kubectl delete -f observability/gateway/ --ignore-not-found
+	kubectl delete -f observability/otel-gateway-deployment.yaml --ignore-not-found
 
 otel-logs:
 	kubectl logs -n platform-observability deploy/otel-gateway --follow
