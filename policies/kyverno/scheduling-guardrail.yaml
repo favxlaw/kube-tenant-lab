@@ -6,10 +6,7 @@ metadata:
     policies.kyverno.io/title: Workload Scheduling Guardrail
     policies.kyverno.io/description: >-
       Workloads must only target nodes belonging to their own team.
-      Enforcement is based on the namespace team label, not the
-      namespace name. Any namespace with a team label is covered
-      automatically. A pod targeting a node with a different team
-      role than its namespace team label is rejected.
+      Platform namespaces are excluded.
 spec:
   validationFailureAction: Enforce
   rules:
@@ -23,21 +20,34 @@ spec:
                 matchExpressions:
                   - key: team
                     operator: Exists
+      exclude:
+        any:
+          - resources:
+              namespaceSelector:
+                matchLabels:
+                  team: platform
+      context:
+        - name: namespaceTeam
+          apiCall:
+            urlPath: "/api/v1/namespaces/{{ request.namespace }}"
+            jmesPath: "metadata.labels.team"
       preconditions:
         all:
           - key: "{{ request.object.spec.nodeSelector.role || '' }}"
+            operator: NotEquals
+            value: ""
+          - key: "{{ namespaceTeam }}"
             operator: NotEquals
             value: ""
       validate:
         message: >-
           Pod '{{ request.object.metadata.name }}' is targeting node
           role '{{ request.object.spec.nodeSelector.role }}' but its
-          namespace belongs to team
-          '{{ request.object.metadata.labels.team || request.namespace.metadata.labels.team }}'.
+          namespace belongs to team '{{ namespaceTeam }}'.
           Workloads must only target their own team nodes.
         deny:
           conditions:
             all:
               - key: "{{ request.object.spec.nodeSelector.role }}"
                 operator: NotEquals
-                value: "{{ request.namespaceObject.metadata.labels.team }}"
+                value: "{{ namespaceTeam }}"

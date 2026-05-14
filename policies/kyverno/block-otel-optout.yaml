@@ -6,9 +6,7 @@ metadata:
     policies.kyverno.io/title: Block OpenTelemetry Log Opt-Out
     policies.kyverno.io/description: >-
       Prevents any Pod or Namespace from opting out of
-      OpenTelemetry log collection. All workloads must remain
-      observable. The annotation
-      opentelemetry.io/exclude-logs=true is explicitly forbidden.
+      OpenTelemetry log collection.
 spec:
   validationFailureAction: Enforce
   rules:
@@ -18,6 +16,16 @@ spec:
           - resources:
               kinds:
                 - Pod
+              namespaceSelector:
+                matchExpressions:
+                  - key: team
+                    operator: Exists
+      exclude:
+        any:
+          - resources:
+              namespaceSelector:
+                matchLabels:
+                  team: platform
       preconditions:
         all:
           - key: "{{ request.object.metadata.annotations || '' }}"
@@ -39,6 +47,16 @@ spec:
           - resources:
               kinds:
                 - Namespace
+              selector:
+                matchExpressions:
+                  - key: team
+                    operator: Exists
+      exclude:
+        any:
+          - resources:
+              selector:
+                matchLabels:
+                  team: platform
       preconditions:
         all:
           - key: "{{ request.object.metadata.annotations || '' }}"

@@ -9,3 +9,12 @@ spec:
   containers:
     - name: app
       image: hashicorp/http-echo:latest
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        allowPrivilegeEscalation: false
+        readOnlyRootFilesystem: true
+        seccompProfile:
+          type: RuntimeDefault
+        capabilities:
+          drop: ["ALL"]
