@@ -14,7 +14,7 @@ controlled ingress, and centralized observability.
 | KIND | Local 3-node cluster using Docker containers as nodes |
 | Cilium | CNI + eBPF-based network policy enforcement + Gateway API controller |
 | Gateway API | Shared ingress routing via GatewayClass, Gateway, and HTTPRoute |
-| Kyverno | Admission webhook policy enforcement |
+| Kyverno | Admission webhook policy enforcement + resource generation |
 | OpenTelemetry | Centralized logs, metrics, and trace collection |
 
 ---
@@ -37,13 +37,13 @@ exclusive by design.
 
 ## Namespace Topology
 
-| Namespace | Owner | Purpose |
-|---|---|---|
-| team-a-demo | team-a | team-a application workloads |
-| team-b-demo | team-b | team-b application workloads |
-| platform-ingress | platform | Gateway and HTTPRoute resources |
-| platform-observability | platform | OTel collectors and telemetry backend |
-| kyverno | platform | Kyverno admission controller |
+| Namespace | Owner | Pod Security | Purpose |
+|---|---|---|---|
+| team-a-demo | team-a | restricted | team-a application workloads |
+| team-b-demo | team-b | restricted | team-b application workloads |
+| platform-ingress | platform | baseline | Gateway and HTTPRoute resources |
+| platform-observability | platform | privileged | OTel collectors and telemetry backend |
+| kyverno | platform | baseline | Kyverno admission controller |
 
 ---
 
@@ -73,29 +73,40 @@ kube-tenant-lab/
 ├── gateway/
 │   ├── gateway.yaml
 │   └── httproutes.yaml
+├── rbac/
+│   ├── platform-readonly-clusterrole.yaml
+│   ├── platform-readonly-clusterrolebinding.yaml
+│   ├── team-serviceaccount.yaml
+│   └── kyverno-background-controller-permissions.yaml
 ├── policies/
 │   ├── kyverno/
 │   │   ├── require-team-label.yaml
 │   │   ├── enforce-namespace-naming.yaml
 │   │   ├── scheduling-guardrail.yaml
 │   │   ├── block-otel-optout.yaml
+│   │   ├── mutate-namespace-pod-security.yaml
+│   │   ├── generate-resource-quota.yaml
+│   │   ├── generate-limit-range.yaml
+│   │   ├── generate-network-policy.yaml
+│   │   ├── generate-rolebinding.yaml
+│   │   ├── generate-platform-config.yaml
 │   │   └── test-cases/
 │   │       ├── bad-namespace-no-label.yaml
 │   │       ├── bad-namespace-wrong-name.yaml
 │   │       ├── bad-workload-wrong-node.yaml
 │   │       └── bad-otel-optout.yaml
 │   └── cilium/
-│       ├── default-deny-team-a.yaml
-│       ├── default-deny-team-b.yaml
-│       ├── allow-gateway-team-a.yaml
-│       ├── allow-gateway-team-b.yaml
-│       ├── allow-dns.yaml
-│       └── allow-otel-egress.yaml
+│       ├── clusterwide-default-deny.yaml
+│       ├── clusterwide-allow-gateway.yaml
+│       ├── clusterwide-allow-dns.yaml
+│       └── clusterwide-allow-otel.yaml
 └── observability/
-    ├── otel-collector-config-agent.yaml
-    ├── otel-agent-daemonset.yaml
-    ├── otel-collector-config-gateway.yaml
-    └── otel-gateway-deployment.yaml
+    ├── otel-gateway-deployment.yaml
+    ├── gateway/
+    │   └── otel-gateway-config.yaml
+    └── collectors/
+        ├── team-a-collector.yaml
+        └── team-b-collector.yaml
 ```
 
 ---
@@ -133,20 +144,41 @@ Layer 1 — Scheduling
   Prevents team-a pods landing on team-b nodes at placement time
 
 Layer 2 — Policy (Kyverno)
-  Admission webhook intercepts every API server request
-  Rejects namespaces without team labels
-  Rejects namespaces with wrong naming convention
-  Rejects workloads targeting the wrong team node
-  Rejects pods opting out of log collection
+  Admission webhook intercepts every API server request before etcd
+  Validate rules reject bad resources immediately
+  Mutate rules add pod security labels automatically
+  Generate rules provision ResourceQuota, LimitRange, NetworkPolicy,
+  RoleBinding, and platform ConfigMap into every new team namespace
 
 Layer 3 — Network (Cilium)
+  CiliumClusterwideNetworkPolicy with label-based selectors
+  Covers all team namespaces automatically without hardcoding names
   eBPF identity-based default-deny posture
-  Pods cannot communicate unless explicitly allowed
-  Only the Gateway path is open to team workloads
-  DNS egress and OTel egress are the only other permitted flows
+  Only Gateway ingress, DNS egress, and OTel egress are explicitly allowed
 ```
 
 Removing any one layer leaves a gap the other two cannot cover.
+
+---
+
+## Platform Contract
+
+When any namespace with a `team` label is created, the following are
+automatically provisioned by Kyverno generate rules with no manual action:
+
+| Resource | Purpose |
+|---|---|
+| ResourceQuota | Total CPU, memory, and object budget per namespace |
+| LimitRange | Per-container resource defaults and ceiling |
+| NetworkPolicy | Default-deny for both ingress and egress |
+| RoleBinding | Team group gets edit access to their own namespace only |
+| platform-config ConfigMap | Platform metadata for auditing and tooling |
+
+Cilium clusterwide policies automatically cover all team namespaces
+the moment they are created via label-based endpoint selectors.
+
+The only resources requiring manual platform action per new team are
+the OTel collector Deployment and the team's HTTPRoute.
 
 ---
 
@@ -164,15 +196,17 @@ Envoy checks routing table programmed from HTTPRoute team-a-route
 Path /team-a matches → forward to team-a-svc:80
         ↓
 Cilium eBPF translates ClusterIP to pod IP, checks network policy
-Policy: allow ingress from reserved:ingress entity on port 8080
+CiliumClusterwideNetworkPolicy: allow ingress from reserved:ingress on port 8080
         ↓
 Request reaches team-a-app container on kube-tenant-lab-worker
 Go HTTP server handles request
 OTel SDK generates trace_id, increments http_requests_total counter
 Structured JSON log written to stdout
         ↓
-OTel agent on same node reads log from /var/log/pods/
-Forwards to OTel gateway in platform-observability
+otel-collector-team-a in platform-observability reads log from
+/var/log/pods/team-a-demo_* on the node filesystem
+Tags record: team=team-a, namespace=team-a-demo, platform=kube-tenant-lab
+Forwards to otel-gateway in platform-observability
         ↓
 Response returns through Envoy to curl
 ```
@@ -183,6 +217,24 @@ Response returns through Envoy to curl
 
 All setup is driven through the Makefile.
 Run targets individually on resource-constrained machines.
+
+### Important — Correct Setup Order
+
+Policies must be deployed before namespaces are created.
+Kyverno generate rules only fire on namespace creation.
+If namespaces exist before policies, delete and recreate them.
+
+```
+make cluster-start
+make cilium-install
+make configure-nodes
+make validate
+make image-push
+make policies-deploy     ← policies before platform
+make platform-deploy     ← namespaces created after policies exist
+make test-clients-deploy
+make otel-deploy
+```
 
 ### 1. Start the cluster
 
@@ -220,6 +272,7 @@ make cilium-install
 Installs experimental Gateway API CRDs first — Cilium 1.15.5 requires
 `tlsroutes` which is only in the experimental channel.
 Then installs Cilium via Helm with Gateway API and Hubble enabled.
+Uses `helm upgrade --install` for idempotency.
 
 Monitor in a second terminal:
 
@@ -267,20 +320,37 @@ make image-push
 Builds the Go HTTP server and loads it into all 3 KIND nodes.
 No registry required — KIND loads images directly into its internal containerd.
 
+### 6. Deploy policies
+
+```bash
+make policies-deploy
+```
+
+Must run before `platform-deploy`. Kyverno generate rules only fire on
+namespace creation. Policies must exist first.
+
+Installs Kyverno via Helm with control plane tolerations, applies all
+Kyverno ClusterPolicies, all RBAC resources, and all
+CiliumClusterwideNetworkPolicies.
+
 Verify:
 
 ```bash
-docker images | grep tenant-app
+kubectl get clusterpolicies
+kubectl get ciliumclusterwidenetworkpolicies
 ```
 
-### 6. Deploy the platform
+### 7. Deploy the platform
 
 ```bash
 make platform-deploy
 ```
 
-Applies namespaces, deploys both team applications, and creates
+Applies namespaces, RBAC, deploys both team applications, and creates
 Gateway and HTTPRoute resources in order.
+
+When namespaces are created, Kyverno automatically generates:
+ResourceQuota, LimitRange, NetworkPolicy, RoleBinding, and platform-config.
 
 Verify pod placement:
 
@@ -299,7 +369,14 @@ kubectl get gateway -n platform-ingress
 
 `PROGRAMMED` must show `True` and `ADDRESS` must have an IP.
 
-Get the Gateway service IP and test routing from inside the KIND network:
+To get the Gateway IP, `cloud-provider-kind` must be running in a
+separate terminal:
+
+```bash
+sudo $(go env GOPATH)/bin/cloud-provider-kind
+```
+
+Test routing from inside the KIND network:
 
 ```bash
 GATEWAY=$(kubectl get svc -n platform-ingress \
@@ -316,31 +393,14 @@ Expected responses:
 {"message":"hello from team-b","team":"team-b","namespace":"team-b-demo","trace_id":"..."}
 ```
 
-### 7. Deploy test clients
+### 8. Deploy test clients
 
 ```bash
-kubectl apply -f test-client.yaml
+make test-clients-deploy
 ```
 
-Deploys a curl client pod in each team namespace for network policy validation.
-Verify both land on the correct nodes:
-
-```bash
-kubectl get pods -n team-a-demo -o wide
-kubectl get pods -n team-b-demo -o wide
-```
-
-### 8. Deploy policies
-
-```bash
-make policies-deploy
-```
-
-Installs Kyverno via Helm with tolerations for the control plane taint,
-then applies all four ClusterPolicies and all Cilium network policies.
-
-Note: Kyverno must run on the control plane node because team nodes are
-tainted for exclusive team workload use.
+Deploys a curl client pod in each team namespace for network policy
+validation. Pods comply with the restricted pod security standard.
 
 ### 9. Deploy observability
 
@@ -348,9 +408,13 @@ tainted for exclusive team workload use.
 make otel-deploy
 ```
 
-Deploys OTel gateway first, then OTel agents.
-Gateway must be ready before agents start to avoid connection errors on startup.
-Both the gateway and agents require tolerations to schedule on tainted nodes.
+Deploys the OTel gateway first, then the platform-owned per-team collectors.
+
+OTel collectors run in `platform-observability` under `privileged` pod
+security because they require `hostPath` to read node log files.
+Each collector is scoped to only one team's namespace log paths.
+Teams have no RBAC access to `platform-observability` and cannot modify
+or delete their collector.
 
 Verify all pods are running:
 
@@ -358,7 +422,14 @@ Verify all pods are running:
 kubectl get pods -n platform-observability -o wide
 ```
 
-Expected: one `otel-gateway` on control-plane, one `otel-agent` on each node.
+Expected:
+
+```
+NAME                                   READY   NODE
+otel-gateway-xxx                       1/1     control-plane
+otel-collector-team-a-xxx              1/1     kube-tenant-lab-worker
+otel-collector-team-b-xxx              1/1     kube-tenant-lab-worker2
+```
 
 ---
 
@@ -372,15 +443,16 @@ Expected: one `otel-gateway` on control-plane, one `otel-agent` on each node.
 | `make cilium-status` | Check Cilium health |
 | `make configure-nodes` | Taint nodes for workload isolation |
 | `make image-push` | Build Go app image and load into KIND |
-| `make platform-deploy` | Deploy namespaces, apps, and gateway |
+| `make policies-deploy` | Install Kyverno, RBAC, and apply all policies |
+| `make platform-deploy` | Deploy namespaces, RBAC, apps, and gateway |
 | `make test-clients-deploy` | Deploy curl client pods for validation |
-| `make policies-deploy` | Install Kyverno and apply all policies |
-| `make otel-deploy` | Deploy OTel agent and gateway |
+| `make otel-deploy` | Deploy OTel gateway and team collectors |
 | `make validate` | Verify cluster, Cilium, and node config |
 | `make validate-all` | Run all validation checks |
 | `make validate-network` | Test Cilium policies and cross-team traffic |
 | `make validate-policies` | Test Kyverno policy rejections |
 | `make validate-otel` | Check OTel pods and gateway logs |
+| `make rbac-apply` | Apply RBAC resources only |
 | `make platform-delete` | Remove all platform resources |
 | `make otel-delete` | Remove OTel resources |
 | `make otel-logs` | Stream OTel gateway logs |
@@ -422,10 +494,20 @@ kubectl apply -f policies/kyverno/test-cases/bad-workload-wrong-node.yaml
 kubectl apply -f policies/kyverno/test-cases/bad-otel-optout.yaml
 ```
 
+### Kyverno auto-generated resources
+
+Verify Kyverno generates the full platform contract on namespace creation:
+
+```bash
+kubectl get resourcequota,limitrange,networkpolicy -n team-a-demo
+kubectl get rolebinding -n team-a-demo
+kubectl get configmap platform-config -n team-a-demo
+```
+
 ### Cilium network policies
 
 ```bash
-kubectl get ciliumnetworkpolicies -A
+kubectl get ciliumclusterwidenetworkpolicies
 
 # Cross-team traffic must be blocked
 kubectl exec -n team-a-demo pod/client -- \
@@ -442,15 +524,21 @@ docker exec kube-tenant-lab-worker curl -s http://$GATEWAY/team-a
 
 ```bash
 kubectl get pods -n platform-observability -o wide
-kubectl logs -n platform-observability deploy/otel-gateway --tail=20
+
+# Generate traffic first
+docker exec kube-tenant-lab-worker curl -s http://$GATEWAY/team-a
+docker exec kube-tenant-lab-worker curl -s http://$GATEWAY/team-b
+
+# Check gateway logs — must show team and namespace attributes
+kubectl logs -n platform-observability deploy/otel-gateway --tail=30
 ```
 
-Logs should show records with `log.file.path` containing the team namespace
-and `platform: kube-tenant-lab` identifying the cluster.
+Logs must contain `team: team-a` or `team: team-b` and
+`platform: kube-tenant-lab` on every record.
 
 ### Hubble UI
 
-Port-forward Hubble UI in a separate terminal:
+Port-forward in a separate terminal:
 
 ```bash
 kubectl port-forward -n kube-system svc/hubble-ui 12000:80
@@ -468,6 +556,7 @@ Generate traffic and observe allowed and dropped flows in real time.
 |---|---|---|
 | KIND instead of cloud | Nodes are Docker containers, not real VMs | Cloud provider managed nodes |
 | Gateway IP not routable from host | KIND Docker network IPs unreachable from laptop, must use docker exec | MetalLB or cloud provider assigns externally routable IPs |
+| cloud-provider-kind required | Must run manually in background for LoadBalancer IP assignment | Cloud provider handles this automatically |
 | `kubeProxyReplacement=false` | Cilium and kube-proxy coexist | Full kube-proxy replacement |
 | Experimental Gateway API CRDs | Required by Cilium 1.15.5 for tlsroutes | Standard channel sufficient on Cilium 1.16+ |
 | Kyverno on control-plane only | Team node taints prevent Kyverno scheduling on worker nodes | Dedicated platform nodes with explicit tolerations |
@@ -475,5 +564,8 @@ Generate traffic and observe allowed and dropped flows in real time.
 | No TLS on Gateway | HTTP only | cert-manager with Let's Encrypt |
 | `allowedRoutes.from: All` | Any namespace can attach to Gateway | Namespace label selector |
 | Single OTel gateway replica | No high availability | Multiple replicas with load balancing |
+| OTel collectors are static per team | New teams require a platform engineer to manually deploy a collector in platform-observability | OTel Operator watches for new namespaces and provisions collectors automatically |
+| OTel collectors in platform-observability | hostPath volumes required for log reading violate restricted pod security in team namespaces | OTel Operator handles privilege escalation cleanly outside team namespaces |
 | reserved:ingress for Gateway allow | Cilium embedded Envoy uses ingress identity not namespace identity | Dedicated Envoy DaemonSet with explicit namespace identity |
+| require-team-label excludes system namespaces by name | Small hardcoded list for known system namespaces | Label-based system namespace identification |
 ```
