@@ -6,8 +6,9 @@ metadata:
     policies.kyverno.io/title: Require Team Label on Namespaces
     policies.kyverno.io/description: >-
       All non-system namespaces must declare a team label
-      identifying the owning team. This enforces ownership
-      visibility across the platform.
+      identifying the owning team. System namespaces are
+      excluded by checking for the kubernetes.io/metadata.name
+      label pattern used by system components.
 spec:
   validationFailureAction: Enforce
   rules:
@@ -20,11 +21,16 @@ spec:
       exclude:
         any:
           - resources:
-              namespaces:
-                - kube-system
-                - kube-public
-                - kube-node-lease
-                - kyverno
+              selector:
+                matchExpressions:
+                  - key: kubernetes.io/metadata.name
+                    operator: In
+                    values:
+                      - kube-system
+                      - kube-public
+                      - kube-node-lease
+                      - kyverno
+                      - local-path-storage
       validate:
         message: >-
           Namespace '{{ request.object.metadata.name }}' is missing

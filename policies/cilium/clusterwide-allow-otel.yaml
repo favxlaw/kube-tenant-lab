@@ -7,32 +7,14 @@ spec:
     matchExpressions:
       - key: io.cilium.k8s.namespace.labels.team
         operator: Exists
+      - key: io.cilium.k8s.namespace.labels.team
+        operator: NotIn
+        values:
+          - platform
   egress:
     - toEndpoints:
         - matchLabels:
             io.kubernetes.pod.namespace: platform-observability
-            app: otel-gateway
-      toPorts:
-        - ports:
-            - port: "4317"
-              protocol: TCP
-            - port: "4318"
-              protocol: TCP
----
-apiVersion: cilium.io/v2
-kind: CiliumClusterwideNetworkPolicy
-metadata:
-  name: allow-intra-team-otel
-spec:
-  endpointSelector:
-    matchExpressions:
-      - key: io.cilium.k8s.namespace.labels.team
-        operator: Exists
-  ingress:
-    - fromEndpoints:
-        - matchExpressions:
-            - key: io.cilium.k8s.namespace.labels.team
-              operator: Exists
       toPorts:
         - ports:
             - port: "4317"

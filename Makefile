@@ -22,10 +22,10 @@ WORKER_B_NODE       := kube-tenant-lab-worker2
         image-build image-load image-push \
         namespaces-apply apps-deploy gateway-deploy platform-deploy platform-delete \
         test-clients-deploy test-clients-delete \
+        rbac-apply \
         kyverno-install kyverno-policies-apply cilium-policies-apply \
         policies-deploy policies-delete \
-        rbac-apply \
-        otel-gateway-deploy otel-agent-deploy otel-deploy otel-delete otel-logs
+        otel-gateway-deploy otel-collectors-deploy otel-deploy otel-delete otel-logs
 
 # ==============================================================
 # Help
@@ -55,24 +55,29 @@ help:
 	@echo ""
 	@echo "  --- Platform ---"
 	@echo "  namespaces-apply     Apply all namespace definitions"
+	@echo "  rbac-apply           Apply RBAC resources"
 	@echo "  apps-deploy          Deploy team-a and team-b applications"
 	@echo "  gateway-deploy       Deploy Gateway and HTTPRoutes"
-	@echo "  platform-deploy      Deploy namespaces, apps, and gateway"
+	@echo "  platform-deploy      Deploy namespaces, RBAC, apps, and gateway"
 	@echo "  platform-delete      Remove all platform resources"
 	@echo ""
+	@echo "  --- Test Clients ---"
+	@echo "  test-clients-deploy  Deploy curl client pods for validation"
+	@echo "  test-clients-delete  Remove curl client pods"
+	@echo ""
 	@echo "  --- Policies ---"
-	@echo "  kyverno-install      Install Kyverno via Helm"
+	@echo "  kyverno-install         Install Kyverno via Helm"
 	@echo "  kyverno-policies-apply  Apply all Kyverno ClusterPolicies"
 	@echo "  cilium-policies-apply   Apply all Cilium network policies"
-	@echo "  policies-deploy      Install Kyverno and apply all policies"
-	@echo "  policies-delete      Remove all policies"
+	@echo "  policies-deploy         Install Kyverno and apply all policies"
+	@echo "  policies-delete         Remove all policies"
 	@echo ""
 	@echo "  --- Observability ---"
-	@echo "  otel-gateway-deploy  Deploy OTel gateway collector"
-	@echo "  otel-agent-deploy    Deploy OTel agent DaemonSet"
-	@echo "  otel-deploy          Deploy full OTel stack"
-	@echo "  otel-delete          Remove OTel resources"
-	@echo "  otel-logs            Stream OTel gateway logs"
+	@echo "  otel-gateway-deploy     Deploy OTel gateway"
+	@echo "  otel-collectors-deploy  Deploy platform-owned team collectors"
+	@echo "  otel-deploy             Deploy full OTel stack"
+	@echo "  otel-delete             Remove OTel resources"
+	@echo "  otel-logs               Stream OTel gateway logs"
 	@echo ""
 	@echo "  --- Validate ---"
 	@echo "  validate             Verify cluster, Cilium, and node config"
@@ -109,7 +114,7 @@ cilium-install:
 	helm repo add cilium https://helm.cilium.io/ || true
 	helm repo update cilium
 	@echo "==> Installing Cilium..."
-	helm install cilium cilium/cilium \
+	helm upgrade --install cilium cilium/cilium \
 		--version $(CILIUM_VERSION) \
 		--namespace kube-system \
 		--set ipam.mode=kubernetes \
@@ -153,10 +158,17 @@ image-push: image-build image-load
 # Platform
 # ==============================================================
 
-platform-deploy: namespaces-apply apps-deploy gateway-deploy
+platform-deploy: namespaces-apply rbac-apply apps-deploy gateway-deploy
 
 namespaces-apply:
 	kubectl apply -f namespaces/
+
+rbac-apply:
+	@echo "==> Applying RBAC..."
+	kubectl apply -f rbac/platform-readonly-clusterrole.yaml
+	kubectl apply -f rbac/platform-readonly-clusterrolebinding.yaml
+	kubectl apply -f rbac/team-serviceaccount.yaml
+	kubectl apply -f rbac/kyverno-background-controller-permissions.yaml
 
 apps-deploy:
 	kubectl apply -f apps/team-a/
@@ -205,25 +217,18 @@ kyverno-install:
 		--timeout 15m \
 		--wait
 
-rbac-apply:
-	@echo "==> Applying RBAC..."
-	kubectl apply -f rbac/platform-readonly-clusterrole.yaml
-	kubectl apply -f rbac/platform-readonly-clusterrolebinding.yaml
-	kubectl apply -f rbac/team-serviceaccount.yaml
-
 kyverno-policies-apply:
 	@echo "==> Applying Kyverno policies..."
 	kubectl apply -f policies/kyverno/require-team-label.yaml
 	kubectl apply -f policies/kyverno/enforce-namespace-naming.yaml
 	kubectl apply -f policies/kyverno/scheduling-guardrail.yaml
 	kubectl apply -f policies/kyverno/block-otel-optout.yaml
+	kubectl apply -f policies/kyverno/mutate-namespace-pod-security.yaml
 	kubectl apply -f policies/kyverno/generate-resource-quota.yaml
 	kubectl apply -f policies/kyverno/generate-limit-range.yaml
 	kubectl apply -f policies/kyverno/generate-network-policy.yaml
 	kubectl apply -f policies/kyverno/generate-rolebinding.yaml
 	kubectl apply -f policies/kyverno/generate-platform-config.yaml
-	kubectl apply -f policies/kyverno/generate-otel-collector.yaml
-	kubectl apply -f policies/kyverno/mutate-namespace-pod-security.yaml
 
 cilium-policies-apply:
 	@echo "==> Applying Cilium clusterwide network policies..."
@@ -242,12 +247,17 @@ policies-delete:
 
 otel-deploy: otel-gateway-deploy otel-collectors-deploy
 
+otel-gateway-deploy:
+	@echo "==> Deploying OTel gateway..."
+	kubectl apply -f observability/gateway/otel-gateway-config.yaml
+	kubectl apply -f observability/otel-gateway-deployment.yaml
+	kubectl rollout status deployment/otel-gateway -n platform-observability
+
 otel-collectors-deploy:
 	@echo "==> Deploying platform-owned team collectors..."
 	kubectl apply -f observability/collectors/
 	kubectl rollout status deployment/otel-collector-team-a -n platform-observability
 	kubectl rollout status deployment/otel-collector-team-b -n platform-observability
-
 
 otel-delete:
 	kubectl delete -f observability/collectors/ --ignore-not-found
@@ -276,8 +286,8 @@ validate-all: validate validate-network validate-policies validate-otel
 
 validate-network:
 	@echo ""
-	@echo "==> Cilium network policies"
-	kubectl get ciliumnetworkpolicies -A
+	@echo "==> Cilium clusterwide network policies"
+	kubectl get ciliumclusterwidenetworkpolicies
 	@echo ""
 	@echo "==> Gateway and HTTPRoutes"
 	kubectl get gateway,httproute -A
@@ -288,10 +298,10 @@ validate-network:
 		|| echo "BLOCKED as expected"
 	@echo ""
 	@echo "==> Testing gateway path (should be ALLOWED)"
-	GATEWAY=$$(kubectl get gateway platform-gateway \
-		-n platform-ingress \
-		-o jsonpath='{.status.addresses[0].value}'); \
-	curl -m 3 http://$$GATEWAY/team-a
+	GATEWAY=$$(kubectl get svc -n platform-ingress \
+		-o jsonpath='{.items[0].status.loadBalancer.ingress[0].ip}'); \
+	docker exec kube-tenant-lab-worker curl -s http://$$GATEWAY/team-a
+
 validate-policies:
 	@echo ""
 	@echo "==> Kyverno cluster policies"
