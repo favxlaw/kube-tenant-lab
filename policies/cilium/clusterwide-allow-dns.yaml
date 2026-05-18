@@ -4,9 +4,13 @@ metadata:
   name: allow-dns-egress-team-namespaces
 spec:
   endpointSelector:
-    matchExpressions:
-      - key: io.cilium.k8s.namespace.labels.team
-        operator: Exists
+  matchExpressions:
+    - key: io.cilium.k8s.namespace.labels.team
+      operator: Exists
+    - key: io.cilium.k8s.namespace.labels.team
+      operator: NotIn
+      values:
+        - platform
   egress:
     - toEndpoints:
         - matchLabels:

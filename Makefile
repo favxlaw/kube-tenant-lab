@@ -25,7 +25,7 @@ WORKER_B_NODE       := kube-tenant-lab-worker2
         rbac-apply \
         kyverno-install kyverno-policies-apply cilium-policies-apply \
         policies-deploy policies-delete \
-        otel-gateway-deploy otel-collectors-deploy otel-deploy otel-delete otel-logs
+        otel-gateway-deploy otel-agent-deploy otel-deploy otel-delete otel-logs
 
 # ==============================================================
 # Help
@@ -73,22 +73,22 @@ help:
 	@echo "  policies-delete         Remove all policies"
 	@echo ""
 	@echo "  --- Observability ---"
-	@echo "  otel-gateway-deploy     Deploy OTel gateway"
-	@echo "  otel-collectors-deploy  Deploy platform-owned team collectors"
-	@echo "  otel-deploy             Deploy full OTel stack"
-	@echo "  otel-delete             Remove OTel resources"
-	@echo "  otel-logs               Stream OTel gateway logs"
+	@echo "  otel-gateway-deploy  Deploy OTel gateway (aggregator)"
+	@echo "  otel-agent-deploy    Deploy OTel agent DaemonSet (per-node collector)"
+	@echo "  otel-deploy          Deploy full OTel stack"
+	@echo "  otel-delete          Remove OTel resources"
+	@echo "  otel-logs            Stream OTel gateway logs"
 	@echo ""
 	@echo "  --- Validate ---"
 	@echo "  validate             Verify cluster, Cilium, and node config"
 	@echo "  validate-all         Run all validation checks"
 	@echo "  validate-network     Check Cilium policies and cross-team traffic"
 	@echo "  validate-policies    Check Kyverno policies and test rejections"
-	@echo "  validate-otel        Check OTel pods and gateway logs"
+	@echo "  validate-otel        Check OTel pods, injection, and gateway logs"
 	@echo ""
 
 # ==============================================================
-# All — full cluster setup
+# All — full cluster bootstrap in correct order
 # ==============================================================
 
 all: cluster-start cilium-install configure-nodes validate
@@ -218,17 +218,16 @@ kyverno-install:
 		--wait
 
 kyverno-policies-apply:
-	@echo "==> Applying Kyverno policies..."
+	@echo "==> Applying Kyverno validate policies..."
 	kubectl apply -f policies/kyverno/require-team-label.yaml
 	kubectl apply -f policies/kyverno/enforce-namespace-naming.yaml
 	kubectl apply -f policies/kyverno/scheduling-guardrail.yaml
 	kubectl apply -f policies/kyverno/block-otel-optout.yaml
+	@echo "==> Applying Kyverno mutate policies..."
 	kubectl apply -f policies/kyverno/mutate-namespace-pod-security.yaml
-	kubectl apply -f policies/kyverno/generate-resource-quota.yaml
-	kubectl apply -f policies/kyverno/generate-limit-range.yaml
-	kubectl apply -f policies/kyverno/generate-network-policy.yaml
+	kubectl apply -f policies/kyverno/inject-otel-endpoint.yaml
+	@echo "==> Applying Kyverno generate policies..."
 	kubectl apply -f policies/kyverno/generate-rolebinding.yaml
-	kubectl apply -f policies/kyverno/generate-platform-config.yaml
 
 cilium-policies-apply:
 	@echo "==> Applying Cilium clusterwide network policies..."
@@ -239,13 +238,20 @@ cilium-policies-apply:
 
 policies-delete:
 	kubectl delete -f policies/cilium/ --ignore-not-found
-	kubectl delete -f policies/kyverno/ --ignore-not-found
+	kubectl delete -f policies/kyverno/require-team-label.yaml --ignore-not-found
+	kubectl delete -f policies/kyverno/enforce-namespace-naming.yaml --ignore-not-found
+	kubectl delete -f policies/kyverno/scheduling-guardrail.yaml --ignore-not-found
+	kubectl delete -f policies/kyverno/block-otel-optout.yaml --ignore-not-found
+	kubectl delete -f policies/kyverno/mutate-namespace-pod-security.yaml --ignore-not-found
+	kubectl delete -f policies/kyverno/inject-otel-endpoint.yaml --ignore-not-found
+	kubectl delete -f policies/kyverno/generate-rolebinding.yaml --ignore-not-found
 
 # ==============================================================
 # Observability
 # ==============================================================
 
-otel-deploy: otel-gateway-deploy otel-collectors-deploy
+# otel-deploy: gateway first — agents forward to it, so it must exist first.
+otel-deploy: otel-gateway-deploy otel-agent-deploy
 
 otel-gateway-deploy:
 	@echo "==> Deploying OTel gateway..."
@@ -253,16 +259,15 @@ otel-gateway-deploy:
 	kubectl apply -f observability/otel-gateway-deployment.yaml
 	kubectl rollout status deployment/otel-gateway -n platform-observability
 
-otel-collectors-deploy:
-	@echo "==> Deploying platform-owned team collectors..."
-	kubectl apply -f observability/collectors/
-	kubectl rollout status deployment/otel-collector-team-a -n platform-observability
-	kubectl rollout status deployment/otel-collector-team-b -n platform-observability
+otel-agent-deploy:
+	@echo "==> Deploying OTel agent DaemonSet..."
+	kubectl apply -f observability/otel-agent.yaml
+	kubectl rollout status daemonset/otel-agent -n platform-observability
 
 otel-delete:
-	kubectl delete -f observability/collectors/ --ignore-not-found
-	kubectl delete -f observability/gateway/ --ignore-not-found
+	kubectl delete -f observability/otel-agent.yaml --ignore-not-found
 	kubectl delete -f observability/otel-gateway-deployment.yaml --ignore-not-found
+	kubectl delete -f observability/gateway/otel-gateway-config.yaml --ignore-not-found
 
 otel-logs:
 	kubectl logs -n platform-observability deploy/otel-gateway --follow
@@ -298,35 +303,50 @@ validate-network:
 		|| echo "BLOCKED as expected"
 	@echo ""
 	@echo "==> Testing gateway path (should be ALLOWED)"
+	@echo "    NOTE: requires cloud-provider-kind running in a separate terminal"
 	GATEWAY=$$(kubectl get svc -n platform-ingress \
 		-o jsonpath='{.items[0].status.loadBalancer.ingress[0].ip}'); \
-	docker exec kube-tenant-lab-worker curl -s http://$$GATEWAY/team-a
+	docker exec kube-tenant-lab-worker curl -s http://$$GATEWAY/team-a; \
+	docker exec kube-tenant-lab-worker curl -s http://$$GATEWAY/team-b
 
 validate-policies:
 	@echo ""
 	@echo "==> Kyverno cluster policies"
 	kubectl get clusterpolicies
 	@echo ""
-	@echo "==> Testing bad namespace no label (should be rejected)"
+	@echo "==> Testing bad namespace — missing team label (should be REJECTED)"
 	kubectl apply -f policies/kyverno/test-cases/bad-namespace-no-label.yaml \
 		|| echo "REJECTED as expected"
 	@echo ""
-	@echo "==> Testing bad namespace wrong name (should be rejected)"
+	@echo "==> Testing bad namespace — wrong name convention (should be REJECTED)"
 	kubectl apply -f policies/kyverno/test-cases/bad-namespace-wrong-name.yaml \
 		|| echo "REJECTED as expected"
 	@echo ""
-	@echo "==> Testing bad workload wrong node (should be rejected)"
+	@echo "==> Testing bad workload — targets wrong team node (should be REJECTED)"
 	kubectl apply -f policies/kyverno/test-cases/bad-workload-wrong-node.yaml \
 		|| echo "REJECTED as expected"
 	@echo ""
-	@echo "==> Testing OTel opt-out annotation (should be rejected)"
+	@echo "==> Testing OTel opt-out annotation (should be REJECTED)"
 	kubectl apply -f policies/kyverno/test-cases/bad-otel-optout.yaml \
 		|| echo "REJECTED as expected"
+	@echo ""
+	@echo "==> Verifying OTel endpoint injected by Kyverno (not in manifest)"
+	kubectl exec -n team-a-demo deploy/team-a-app -- env | grep OTEL_EXPORTER_OTLP_ENDPOINT
 
 validate-otel:
 	@echo ""
-	@echo "==> OTel pods"
+	@echo "==> OTel pods in platform-observability"
 	kubectl get pods -n platform-observability -o wide
 	@echo ""
-	@echo "==> OTel gateway logs (last 20 lines)"
-	kubectl logs -n platform-observability deploy/otel-gateway --tail=20
+	@echo "==> OTel agent DaemonSet — one pod per node expected"
+	kubectl get daemonset otel-agent -n platform-observability
+	@echo ""
+	@echo "==> Generating traffic to populate telemetry..."
+	@echo "    NOTE: requires cloud-provider-kind running in a separate terminal"
+	GATEWAY=$$(kubectl get svc -n platform-ingress \
+		-o jsonpath='{.items[0].status.loadBalancer.ingress[0].ip}'); \
+	docker exec kube-tenant-lab-worker curl -s http://$$GATEWAY/team-a; \
+	docker exec kube-tenant-lab-worker curl -s http://$$GATEWAY/team-b
+	@echo ""
+	@echo "==> OTel gateway logs — must show team and namespace attributes"
+	kubectl logs -n platform-observability deploy/otel-gateway --tail=30
