@@ -1,7 +1,7 @@
 apiVersion: v1
 kind: ServiceAccount
 metadata:
-  name: otel-collector
+  name: otel-agent
   namespace: platform-observability
   labels:
     team: platform
@@ -9,7 +9,7 @@ metadata:
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
 metadata:
-  name: otel-collector
+  name: otel-agent
   labels:
     team: platform
 rules:
@@ -20,32 +20,32 @@ rules:
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding
 metadata:
-  name: otel-collector
+  name: otel-agent
   labels:
     team: platform
 roleRef:
   apiGroup: rbac.authorization.k8s.io
   kind: ClusterRole
-  name: otel-collector
+  name: otel-agent
 subjects:
   - kind: ServiceAccount
-    name: otel-collector
+    name: otel-agent
     namespace: platform-observability
 ---
+# --- ConfigMap: the collector configuration ---
 apiVersion: v1
 kind: ConfigMap
 metadata:
-  name: otel-collector-team-a-config
+  name: otel-agent-config
   namespace: platform-observability
   labels:
     team: platform
-    tenant: team-a
 data:
   config.yaml: |
     receivers:
       filelog:
         include:
-          - /var/log/pods/team-a-demo_*/*/*.log
+          - /var/log/pods/*/*/*.log
         start_at: beginning
         include_file_path: true
         include_file_name: false
@@ -55,80 +55,112 @@ data:
           - type: move
             from: attributes["log.file.path"]
             to: resource["log.file.path"]
+          - type: regex_parser
+            regex: '^/var/log/pods/(?P<namespace>[^_]+)_(?P<pod_name>[^_]+)_(?P<uid>[^/]+)/(?P<container>[^/]+)/'
+            parse_from: resource["log.file.path"]
+            on_error: send_quiet
+          - type: move
+            from: resource.uid
+            to: resource["k8s.pod.uid"]
+          - type: move
+            from: resource.namespace
+            to: resource["k8s.namespace.name"]
+          - type: move
+            from: resource.pod_name
+            to: resource["k8s.pod.name"]
       otlp:
         protocols:
           grpc:
             endpoint: 0.0.0.0:4317
+
     processors:
-      resource:
-        attributes:
-          - key: team
-            value: team-a
-            action: insert
-          - key: namespace
-            value: team-a-demo
-            action: insert
-          - key: platform
-            value: kube-tenant-lab
-            action: insert
+      k8sattributes:
+        auth_type: serviceAccount
+        filter:
+          node_from_env_var: KUBE_NODE_NAME
+        extract:
+          metadata:
+            - k8s.namespace.name
+            - k8s.pod.name
+            - k8s.node.name
+          labels:
+            - tag_name: team
+              key: team
+              from: namespace
+        pod_association:
+          - sources:
+              - from: resource_attribute
+                name: k8s.pod.uid
+          - sources:
+              - from: connection
+
       batch:
         timeout: 5s
         send_batch_size: 1000
+
     exporters:
       otlp:
         endpoint: otel-gateway.platform-observability.svc.cluster.local:4317
         tls:
           insecure: true
+
     service:
       pipelines:
         logs:
           receivers: [filelog]
-          processors: [resource, batch]
+          processors: [k8sattributes, batch]
           exporters: [otlp]
         traces:
           receivers: [otlp]
-          processors: [resource, batch]
+          processors: [k8sattributes, batch]
           exporters: [otlp]
         metrics:
           receivers: [otlp]
-          processors: [resource, batch]
+          processors: [k8sattributes, batch]
           exporters: [otlp]
 ---
+# --- DaemonSet ---
 apiVersion: apps/v1
-kind: Deployment
+kind: DaemonSet
 metadata:
-  name: otel-collector-team-a
+  name: otel-agent
   namespace: platform-observability
   labels:
-    app: otel-collector-team-a
+    app: otel-agent
     team: platform
-    tenant: team-a
 spec:
-  replicas: 1
   selector:
     matchLabels:
-      app: otel-collector-team-a
+      app: otel-agent
   template:
     metadata:
       labels:
-        app: otel-collector-team-a
+        app: otel-agent
         team: platform
-        tenant: team-a
-      annotations: {}
     spec:
-      serviceAccountName: otel-collector
-      nodeSelector:
-        role: team-a
+      serviceAccountName: otel-agent
       tolerations:
-        - key: "team"
-          operator: "Equal"
-          value: "team-a"
-          effect: "NoSchedule"
+        - key: node-role.kubernetes.io/control-plane
+          operator: Exists
+          effect: NoSchedule
+        - key: team
+          operator: Exists
+          effect: NoSchedule
+
       containers:
-        - name: otel-collector
+        - name: otel-agent
           image: otel/opentelemetry-collector-contrib:0.96.0
           args:
             - "--config=/conf/config.yaml"
+          env:
+            - name: KUBE_NODE_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: spec.nodeName
+          ports:
+            - containerPort: 4317
+              name: otlp-grpc
+              protocol: TCP
           volumeMounts:
             - name: config
               mountPath: /conf
@@ -142,26 +174,28 @@ spec:
             limits:
               memory: "256Mi"
               cpu: "200m"
+
       volumes:
         - name: config
           configMap:
-            name: otel-collector-team-a-config
+            name: otel-agent-config
         - name: varlogpods
           hostPath:
             path: /var/log/pods
+            type: Directory
 ---
+# --- Service ---
 apiVersion: v1
 kind: Service
 metadata:
-  name: otel-collector-team-a
+  name: otel-agent
   namespace: platform-observability
   labels:
-    app: otel-collector-team-a
+    app: otel-agent
     team: platform
-    tenant: team-a
 spec:
   selector:
-    app: otel-collector-team-a
+    app: otel-agent
   ports:
     - name: otlp-grpc
       port: 4317
