@@ -1,0 +1,36 @@
+apiVersion: kyverno.io/v1
+kind: ClusterPolicy
+metadata:
+  name: inject-otel-endpoint
+  annotations:
+    policies.kyverno.io/title: Inject OTel Exporter Endpoint
+    policies.kyverno.io/description: >-
+      Injects OTEL_EXPORTER_OTLP_ENDPOINT into every container in team
+      namespaces. The platform owns OTel routing — teams cannot override
+      this to a custom endpoint. Consistent with block-otel-optout policy.
+spec:
+  rules:
+    - name: inject-otel-exporter-endpoint
+      match:
+        any:
+          - resources:
+              kinds:
+                - Pod
+              namespaceSelector:
+                matchExpressions:
+                  - key: team
+                    operator: Exists
+      exclude:
+        any:
+          - resources:
+              namespaceSelector:
+                matchLabels:
+                  team: platform
+      mutate:
+        patchStrategicMerge:
+          spec:
+            containers:
+              - (name): "?*"
+                env:
+                  - name: OTEL_EXPORTER_OTLP_ENDPOINT
+                    value: "otel-agent.platform-observability.svc.cluster.local:4317"
